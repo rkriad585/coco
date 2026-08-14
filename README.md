@@ -208,7 +208,7 @@ To be successful, your language needs to strike a balance between performance, s
 
 ## **Introduction**
 
-Welcome to **Coco** - the most powerful, modern, and advanced programming language designed by **RK Riad**, owner of **RK Studio**. Coco is engineered to be faster, safer, and more versatile than any existing language, surpassing **C/C++**, **Python**, **Rust**, **Ruby**, and more.
+Welcome to **Coco** - the most powerful, modern, and advanced programming language designed by **RK Riad Khan**, owner of **rkriad585**. Coco is engineered to be faster, safer, and more versatile than any existing language, surpassing **C/C++**, **Python**, **Rust**, **Ruby**, and more.
 
 Coco is designed with the following goals in mind:
 
@@ -247,10 +247,7 @@ Coco is designed to easily interface with existing C/C++ codebases, allowing you
 
 ### **Installation**
 
-```bash
-# Install Coco using the official package manager
-$ coco install coco-lang
-```
+Install the cross platfrom coco executable
 
 ### **Your First Coco Program**
 
@@ -321,13 +318,8 @@ fn main() {
 - **Speed**: Coco's performance surpasses Ruby's, making it better suited for applications where speed is critical.
 - **Concurrency**: Coco's built-in concurrency models make it far superior for building scalable, multi-threaded applications.
 
-## **About RK Riad**
-RK Riad, the visionary behind Coco, is a renowned software architect and the founder of **RK Studio**. With a passion for innovation and a deep understanding of programming languages, RK Riad has dedicated his career to creating tools that empower developers worldwide. Under his leadership, RK Studio has become a hub for cutting-edge software development, pushing the boundaries of what’s possible in technology.
-
-### **Contact**
-- **Website**: [RK Studio](https://m-rrk-riad.vercel.app)
-- **GitHub**: [RK Riad's GitHub](https://github.com/mdriyadkhan585)
-- **Twitter**: [@RKRiad](https://twitter.com/mrrkriad)
+## **About RK Riad Khan**
+RK Riad Khan, the visionary behind Coco, is a renowned software architect and the founder of **rkriad585**. With a passion for innovation and a deep understanding of programming languages, RK Riad Khan has dedicated his career to creating tools that empower developers worldwide. Under his leadership, rkriad585 has become a hub for cutting-edge software development, pushing the boundaries of what’s possible in technology.
 
 ## **Contributing**
 We welcome contributions from the community! If you're interested in contributing to Coco, please check out our [Contribution Guidelines](CONTRIBUTING.md).
@@ -336,16 +328,16 @@ We welcome contributions from the community! If you're interested in contributin
 Coco is open-source software licensed under the [MIT License](LICENSE.md).
 
 ---
-Made with ❤️ by RK Riad and the team at **RK Studio**
+Made with ❤️ by rkriad585**
 
 ## **Contributing to Coco**
 
 We welcome contributions from developers, enthusiasts, and anyone passionate about programming languages. To contribute to the Coco project:
 
-1. **Fork the Repository**: Start by forking our [GitHub repository](https://github.com/mdriyadkhan585/coco) to your own GitHub account.
+1. **Fork the Repository**: Start by forking our [GitHub repository](https://github.com/rkriad585/coco) to your own GitHub account.
 2. **Clone Your Fork**: Clone the forked repository to your local machine:
     ```bash
-    git clone https://github.com/mdriyadkhan585/coco.git
+    git clone https://github.com/rkriad585/coco.git
     ```
 3. **Create a Branch**: Create a new branch for your changes:
     ```bash
@@ -372,7 +364,7 @@ A: Coco combines the speed and performance of C/C++ with the ease of use and saf
 
 **Q: How can I get support if I encounter issues?**
 A: You can seek help by:
-- Opening an issue on our [GitHub repository](https://github.com/mdriyadkhan585/coco/issues).
+- Opening an issue on our [GitHub repository](https://github.com/rkriad585/coco/issues).
 - Joining our community forums or Discord server.
 - Consulting the [Coco Documentation](index.md) for troubleshooting tips.
 
@@ -396,13 +388,12 @@ We would like to thank the open-source community and contributors who have suppo
 
 ---
 
-**Made with ❤️ by RK Riad and the team at RK Studio**
+**Made with ❤️ by RK Riad Khan**
 
 For more information and updates about Coco, follow us on:
 
-- **Website**: [RK Studio](https://m-rrk-riad.vercel.app)
-- **GitHub**: [RK Riad's GitHub](https://github.com/mdriyadkhan585)
-- **Twitter**: [@RKRiad](https://twitter.com/mrrkriad)
+- [Website](https://rkriad585.github.io)
+- [GitHub](https://github.com/rkriad585)
 
 Feel free to reach out for collaborations, inquiries, or just to say hello!
 
