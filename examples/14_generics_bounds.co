@@ -1,0 +1,27 @@
+# 14 — Generics with bounds               (plan §5.9)
+def first[T](items: list[T]) -> T:       # generic function, monomorphized
+    return items[0]
+
+struct Pair[A, B]:                       # generic struct
+    first: A
+    second: B
+
+trait Hashable:
+    def hash(self) -> u64
+
+struct Key:
+    code: int
+
+impl Hashable for Key:
+    def hash(self) -> u64:
+        return self.code as u64 * 2654435761 % 4294967296
+
+def bucket[T is Hashable](item: T) -> u64:   # trait bound checked at DEFINITION site
+    return item.hash() % 256
+
+def main():
+    print(first([10, 20, 30]))                    # list[int]
+    print(first(["a", "b"]))                      # list[string]
+    p = Pair(first: 1, second: "two")
+    print(p.first, p.second)
+    print(bucket(Key(code: 7)))

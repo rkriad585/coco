@@ -1,0 +1,30 @@
+# 15 — Operator overloading via well-known traits   (plan §5.8)
+# `a + b` lowers to Add.add(a, b);  `g[i]` lowers to Index.index(g, i).
+struct Vec2:
+    x: f64
+    y: f64
+
+impl Add for Vec2:
+    def add(self, other: Vec2) -> Vec2:
+        return Vec2(x: self.x + other.x, y: self.y + other.y)
+
+impl Eq for Vec2:
+    def eq(self, other: Vec2) -> bool:
+        return self.x == other.x and self.y == other.y
+
+struct Grid:
+    cells: list[int]
+
+impl Index for Grid:
+    def index(self, i: int) -> int:
+        return self.cells[i]
+
+def main():
+    a = Vec2(x: 1.0, y: 2.0)
+    b = Vec2(x: 3.0, y: 4.0)
+    c = a + b                             # calls Add.add
+    print(c.x, c.y)
+    print(a == b)                         # calls Eq.eq
+
+    g = Grid(cells: [10, 20, 30])
+    print(g[1])                           # calls Index.index → 20

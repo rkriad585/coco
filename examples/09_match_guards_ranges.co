@@ -1,0 +1,17 @@
+# 09 — match: literals, guards, range patterns, wildcard   (plan §5.7)
+def describe(n: int) -> string:
+    match n:
+        case 0:
+            return "zero"
+        case 1..=9:                      # inclusive range pattern
+            return "single digit"
+        case v if v < 0:                 # guard expression
+            return "negative"
+        case _:
+            return "many"
+
+def main():
+    print(describe(0))
+    print(describe(-7))
+    print(describe(5))
+    print(describe(123))

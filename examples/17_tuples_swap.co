@@ -1,0 +1,18 @@
+# 17 — Tuples & multiple assignment      (plan §5.4)
+def minmax(xs: list[int]) -> (int, int):         # tuple return type
+    return (xs[0], xs[len(xs) - 1])
+
+def main():
+    point = (3, 4)                               # tuple literal
+    x, y = point                                 # destructuring assignment
+    print(x, y)
+
+    a, b = 1, 2
+    a, b = b, a                                  # swap — no temp variable needed
+    print(a, b)
+
+    lo, hi = minmax([7, 2, 9, 4])
+    print(lo, hi)
+
+    single = (42,)                               # one-element tuple needs trailing comma
+    print(single)

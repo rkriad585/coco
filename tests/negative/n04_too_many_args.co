@@ -1,0 +1,4 @@
+﻿# expect: too many arguments
+def f(a: int) -> int:
+    return a
+print(f(1, 2))

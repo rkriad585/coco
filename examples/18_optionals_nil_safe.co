@@ -1,0 +1,26 @@
+# 18 — Optionals: T?, none, nil-safe access   (plan §5.4)
+def find(xs: list[int], target: int) -> int?:    # option sugar: int? == option[int]
+    for i in 0..len(xs):
+        if xs[i] == target:
+            return xs[i]
+    return none
+
+def main():
+    hit = find([10, 20, 30], 20)
+    miss = find([10, 20, 30], 99)
+
+    # explicit handling via match:
+    match hit:
+        case v:
+            print(f"found {v}")
+        case none:
+            print("not found")
+
+    # coalescing via conditional expression:
+    port = if miss is none: -1 else: miss
+    print(port)
+
+    # nil-safe member access returns none instead of panicking:
+    names = {"admin": "Riad"}
+    first = names.get("guest") .?. upper()
+    print(first)

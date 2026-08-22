@@ -1,0 +1,21 @@
+# 26 — Custom iterators & lazy views      (plan §13 collections/iterators)
+struct Range:
+    cur: int
+    limit: int
+
+impl Iterator for Range:
+    def next(self) -> int?:              # none signals end of iteration
+        if self.cur >= self.limit:
+            return none
+        val = self.cur
+        self.cur += 1
+        return val
+
+def main():
+    r = Range(cur: 0, limit: 5)
+    for n in r:                          # any type with Iterator works in for-in
+        print(n)
+
+    nums = [1, 2, 3, 4, 5, 6]
+    total = nums.filter((x) => x % 2 == 0).map((x) => x * 10).sum()
+    print(total)                         # lazy view chain: no intermediate lists

@@ -1,0 +1,25 @@
+# 20 — defer & panic                      (plan §7, §8)
+def process(path: string):
+    f = io.open(path)
+    defer f.close()                      # runs at scope exit, LIFO order
+    print(f"processing {path}")
+    # ... work with f ...                # even on early return or panic unwind
+
+def risky(n: int) -> int:
+    if n < 0:
+        panic("n must be >= 0")          # programmer bug → unwinds with backtrace
+    return n * n
+
+def try_risky() -> int:                  # named closure for catch_panic boundary
+    return risky(-1)
+
+def main():
+    process("data.txt")
+
+    print(risky(9))
+    outcome = catch_panic(try_risky)
+    match outcome:
+        case ok(v):
+            print(v)
+        case err(msg):
+            print(f"recovered from: {msg}")

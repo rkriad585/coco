@@ -1,0 +1,44 @@
+# 30 — CAPSTONE: word-frequency counter   (combines §5, §7, §13)
+# Reads text (here: inline sample), counts words concurrently per chunk,
+# merges results, prints top 3 — every feature from examples 01–29 in play.
+
+def count_chunk(words: list[string], out: chan[dict[string, int]]):
+    counts = {}
+    for w in words:
+        w = w.to_lower()
+        if w in counts:
+            counts[w] += 1
+        else:
+            counts[w] = 1
+    out.send(counts)
+
+def merge(target: dict[string, int], src: dict[string, int]):
+    for k in src.keys():
+        if k in target:
+            target[k] += src[k]
+        else:
+            target[k] = src[k]
+
+def top3(counts: dict[string, int]) -> list[(string, int)]:
+    pairs = []
+    for k in counts.keys():
+        pairs.append((k, counts[k]))
+    pairs.sort(key: ((p) => p[1]), reverse: true)   # sort by count desc
+    return pairs[0..3]
+
+def main():
+    text = "the quick brown fox the lazy dog the fox"
+    chunks = [text.split(" ")[0..8], text.split(" ")[8..]]
+    out = chan[dict[string, int]]()
+
+    for c in chunks:
+        spawn count_chunk(c, out)
+
+    total = {}
+    for _ in 0..len(chunks):
+        merge(total, out.recv())         # one recv per chunk
+
+    for pair in top3(total):
+        match pair:
+            case (word, n):
+                print(f"{word}: {n}")

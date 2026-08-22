@@ -1,0 +1,17 @@
+# 25 — Operator precedence showcase       (grammar §2)
+def main():
+    r1 = -2 ** 2                         # -(2**2) = -4   (** binds tighter than unary -)
+    r2 = (-2) ** 2                       # 4              (parentheses override)
+    r3 = 7 // 2                          # 3              (floor division, ints)
+    r4 = 7 % 3                           # 1              (remainder)
+    r5 = 1 << 4 | 3 & 1                  # 16             (& before | before shifts? no:
+                                         #  shifts(12) > &(11) > |(9) → (1<<4) | (3&1))
+    r6 = 2 ** 3 ** 2                     # 512            (** is right-associative)
+
+    xs = [5, 10, 15]
+    i = 1
+    chained = 0 <= i < len(xs)           # Python-style comparison chaining
+    logic = not chained and true or false
+
+    print(r1, r2, r3, r4, r5, r6)
+    print(chained, logic)

@@ -1,0 +1,21 @@
+# 28 — weak references break ARC cycles   (plan §6.1)
+struct Node:
+    name: string
+    var parent: Node?                    # strong reference (owns)
+    weak var child: Node?                # weak ref: does NOT keep target alive
+
+def main():
+    parent = new Node(name: "parent")
+    child = new Node(name: "child")
+
+    child.parent = parent                # strong: parent kept alive by child
+    parent.child = child                 # WEAK: no retain → no cycle → freed
+
+    # Weak access yields an option — the object may be gone:
+    match parent.child:
+        case c:
+            print(f"child is {c.name}")
+        case none:
+            print("child was deallocated")
+
+    print(child.parent.name)             # strong path: always valid here
