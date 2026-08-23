@@ -26,15 +26,17 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
-          $coco = "build\Debug\coco.exe"
-          $run = "build\Debug\cocorun.exe"
-          & $coco targets
+          # absolute paths: relative ones break after Push-Location
+          # (and pwsh then reports "The module 'build' could not be loaded")
+          $coco = Join-Path $PWD "build\Debug\coco.exe"
+          $run = Join-Path $PWD "build\Debug\cocorun.exe"
+          & $coco "targets"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          & $coco new demo
+          & $coco "new" "demo"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           Push-Location demo
           try {
-            & $coco build -B
+            & $coco "build" "-B"
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
             $cob = Get-ChildItem build -Recurse -Filter demo.cob | Select-Object -First 1
             if (-not $cob) { Write-Host "::error::no .cob produced"; exit 1 }
@@ -83,13 +85,16 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
-          & build\coco.exe targets
+          # absolute paths survive Push-Location armapp below
+          $coco = Join-Path $PWD "build\coco.exe"
+          $run = Join-Path $PWD "build\cocorun.exe"
+          & $coco "targets"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          & build\coco.exe new armapp
+          & $coco "new" "armapp"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           Push-Location armapp
           try {
-            & ..\build\coco.exe build --release --target=windows-arm64
+            & $coco "build" "--release" "--target=windows-arm64"
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
             $exe = Get-ChildItem build -Recurse -Filter armapp.exe |
               Where-Object { $_.FullName -match "windows-arm64" } |
@@ -105,11 +110,11 @@ jobs:
             }
 
             # no-toolchain target must fall back to a runnable portable bundle
-            & ..\build\coco.exe build --target=linux-amd64
+            & $coco "build" "--target=linux-amd64"
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
             $cob = Get-ChildItem build -Recurse -Filter armapp.cob |
               Select-Object -First 1
             if (-not $cob) { Write-Host "::error::no .cob fallback"; exit 1 }
-            $out = (& ..\build\cocorun.exe $cob.FullName) -join "; "
+            $out = (& $run $cob.FullName) -join "; "
             Write-Host "bundle output: $out"
           } finally { Pop-Location }
