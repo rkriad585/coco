@@ -71,6 +71,8 @@ private:
                         uint32_t col);
     bool matchArgs(const FuncSig& sig, const std::vector<ast::CallArg>& args,
                    uint32_t line, uint32_t col, const char* what);
+    TyP checkEnumCtorCall(const Symbol* vs,
+                          const std::vector<ast::CallArg>& args);
     TyP memberAccess(const TyP& obj, const std::string& name, uint32_t line,
                      uint32_t col, bool nilSafe);
 
@@ -79,6 +81,9 @@ private:
                       uint32_t line, uint32_t col);
     TyP iterableElem(const TyP& t) const;       // nullopt-equivalent: unkTy()
     std::optional<FuncSig> methodLookup(const TyP& recv, const std::string& name) const;
+    bool isSendable(const TyP& t, std::string* why);
+    bool isSendableVisit(const TyP& t, std::string* why,
+                         std::set<std::string>& seeing);
 
     DiagEngine& diags_;
     Scope* scope_ = nullptr;
@@ -93,6 +98,7 @@ private:
     TyP selfTy_;
     TyP currentRet_;
     int loopDepth_ = 0;
+    int quiet_ = 0;   // >0: error() is suppressed (speculative re-walks)
 };
 
 } // namespace sema

@@ -57,10 +57,16 @@ std::string toString(const Ty& t) {
             s += t.inner ? toString(*t.inner) : "none";
             return s;
         }
-        case TyK::Opt:      return (t.inner ? toString(*t.inner) : "?") + std::string("?");
-        case TyK::Ptr:      return "*" + (t.inner ? toString(*t.inner) : "");
+        case TyK::Opt:      return (t.inner ? toString(*t.inner)
+                                    : !t.args.empty() ? toString(*t.args[0])
+                                                      : "?") + std::string("?");
+        case TyK::Ptr:      return "*" + (t.inner ? toString(*t.inner)
+                                    : !t.args.empty() ? toString(*t.args[0])
+                                                      : "");
         case TyK::Ref:      return (t.name == "mut" ? "&mut " : "&") +
-                                   (t.inner ? toString(*t.inner) : "");
+                                   (t.inner ? toString(*t.inner)
+                                    : !t.args.empty() ? toString(*t.args[0])
+                                                      : "");
         case TyK::Struct:   return t.name;
         case TyK::EnumName: return t.name;
         case TyK::EnumVal:  return t.name + "." + t.variant;
@@ -122,6 +128,7 @@ bool isBoolish(const TyP& t) {
 // ============================== infrastructure ==============================
 
 void Checker::error(uint32_t line, uint32_t col, const std::string& msg) {
+    if (quiet_ > 0) return;   // speculative re-walk: real pass already reported
     diags_.report(line, col, msg);
 }
 
@@ -356,6 +363,7 @@ void Checker::fillNominals(const std::vector<ast::StmtP>& prog) {
 
             case StKind::EnumDef: {
                 TvGuard tv(typeVars_, st->typeParams);
+                auto es = enums_[st->name];
                 for (const auto& v : st->variants) {
                     auto vs = std::make_shared<Symbol>();
                     vs->kind = SymK::EnumVariant;
@@ -363,6 +371,9 @@ void Checker::fillNominals(const std::vector<ast::StmtP>& prog) {
                     vs->enumOf = st->name;
                     for (const auto& p : v.payload)
                         vs->payloads.emplace_back(p.name, resolveType(p.type));
+                    if (es)
+                        for (const auto& p : vs->payloads)
+                            es->variantPayloads[v.name].push_back(p);
                     if (Symbol* clash = scope_->declare(vs))
                         error(v.span.line, v.span.col,
                               "'" + v.name + "' is already defined");
@@ -1310,6 +1321,20 @@ void Checker::checkStmt(const ast::Stmt& s) {
                           std::string(s.kind == StKind::Spawn ? "spawn"
                                                               : "defer") +
                               " expects a function call");
+                // spawn runs concurrently: every argument crosses threads
+                if (s.kind == StKind::Spawn && call.kind == ExKind::Call) {
+                    for (const auto& a : call.args) {
+                        ++quiet_;
+                        TyP at = checkExpr(*a.value);
+                        --quiet_;
+                        std::string why;
+                        if (!isSendable(at, &why))
+                            error(a.value->span.line, a.value->span.col,
+                                  "cannot pass " + toString(*at) +
+                                      " to 'spawn': " + why +
+                                      " is not sendable");
+                    }
+                }
             }
             break;
 
@@ -1944,15 +1969,129 @@ TyP Checker::checkMemberCall(const TyP& recv, const std::string& name,
         return unkTy();
     }
     matchArgs(*sig, args, line, col, ("method '" + name + "'").c_str());
+
+    // sendability: values crossing threads through a channel must not carry
+    // raw pointers/references, function values, or trait objects
+    if (recv && recv->is(TyK::Chan) && name == "send" && !args.empty()) {
+        ++quiet_;
+        TyP at = checkExpr(*args[0].value);
+        --quiet_;
+        std::string why;
+        if (!isSendable(at, &why))
+            error(args[0].value->span.line, args[0].value->span.col,
+                  "cannot send " + toString(*at) +
+                      " across threads: " + why + " is not sendable");
+    }
     return sig->ret;
 }
 
+// plan §7: shared memory is opt-in and checked. A type is sendable when it
+// cannot smuggle a thread-foreign address: primitives and immutable containers
+// of sendables are fine; pointers, references, function values and trait
+// objects are rejected.
+bool Checker::isSendable(const TyP& t, std::string* why) {
+    std::set<std::string> seen;
+    return isSendableVisit(t, why, seen);
+}
+
+bool Checker::isSendableVisit(const TyP& t, std::string* why,
+                              std::set<std::string>& seeing) {
+    auto reject = [&](const char* kind) {
+        if (why) *why = kind;
+        return false;
+    };
+    if (!t || t->isError() || t->isUnknown() || t->is(TyK::TypeVar))
+        return true;   // don't cascade into poisoned/dynamic types
+    switch (t->k) {
+        case TyK::None:
+        case TyK::Bool:
+        case TyK::Int:
+        case TyK::Float:
+        case TyK::Str:
+        case TyK::Char:
+            return true;
+        case TyK::Ptr:      return reject("raw pointer");
+        case TyK::Ref:      return reject("reference");
+        case TyK::Fn:       return reject("function value");
+        case TyK::TraitObj: return reject("trait object");
+        case TyK::Opt:
+        case TyK::List:
+        case TyK::Set:
+        case TyK::Chan:
+        case TyK::Range:
+        case TyK::Gen:
+            return t->args.empty() ||
+                   isSendableVisit(t->args[0], why, seeing);
+        case TyK::Dict:
+            if (t->args.size() < 2) return true;
+            return isSendableVisit(t->args[0], why, seeing) &&
+                   isSendableVisit(t->args[1], why, seeing);
+        case TyK::Tuple: {
+            for (const auto& it : t->args)
+                if (!isSendableVisit(it, why, seeing)) return false;
+            return true;
+        }
+        case TyK::Struct: {
+            if (!seeing.insert(t->name).second) return true;  // cycle: assume ok
+            auto it = structs_.find(t->name);
+            if (it == structs_.end()) return true;   // unknown: don't cascade
+            for (const auto& [fname, fty] : it->second->fields)
+                if (!isSendableVisit(fty, why, seeing)) return false;
+            return true;
+        }
+        case TyK::EnumVal: {
+            auto it = enums_.find(t->name);
+            if (it == enums_.end()) return true;   // unknown: don't cascade
+            if (!seeing.insert("enum:" + t->name + "." + t->variant).second)
+                return true;
+            auto vit = it->second->variantPayloads.find(t->variant);
+            if (vit == it->second->variantPayloads.end()) return true;
+            for (const auto& pp : vit->second)
+                if (!isSendableVisit(pp.second, why, seeing)) return false;
+            return true;
+        }
+        default:
+            return true;
+    }
+}
+
+TyP Checker::checkEnumCtorCall(const Symbol* vs,
+                               const std::vector<ast::CallArg>& args) {
+    std::map<std::string, TyP> payloads;
+    for (const auto& p : vs->payloads) payloads[p.first] = p.second;
+    for (const auto& a : args) {
+        TyP at = checkExpr(*a.value);
+        if (!a.name.empty()) {
+            auto pit = payloads.find(a.name);
+            if (pit != payloads.end() && !assignable(at, pit->second))
+                error(a.value->span.line, a.value->span.col,
+                      "payload '" + a.name + "' mismatch");
+        }
+    }
+    auto vt = std::shared_ptr<Ty>(new Ty());
+    vt->k = TyK::EnumVal;
+    vt->name = vs->enumOf;
+    vt->variant = vs->name;
+    return vt;
+}
+
 TyP Checker::checkCall(const ast::Expr& e) {
+
     const ast::Expr* callee = e.lhs.get();
     if (!callee) return unkTy();
 
     // method call: recv.method(args)
     if (callee->kind == ExKind::Member) {
+        // enum variant construction: E.variant(payloads...)
+        if (callee->lhs && callee->lhs->kind == ExKind::Ident) {
+            Symbol* es = scope_->find(callee->lhs->text);
+            if (es && es->kind == SymK::EnumName) {
+                Symbol* vs = scope_->find(callee->text);
+                if (vs && vs->kind == SymK::EnumVariant &&
+                    vs->enumOf == es->name)
+                    return checkEnumCtorCall(vs, e.args);
+            }
+        }
         TyP recv = checkExpr(*callee->lhs);
         bool nilCall = callee->nilSafe;
         TyP target = nilCall ? unwrapOpt(recv) : recv;
@@ -2059,28 +2198,33 @@ TyP Checker::checkCall(const ast::Expr& e) {
             }
             return lookupNominal(TyK::Struct, sym->name);
         }
-        if (sym && sym->kind == SymK::EnumVariant) {
-            std::map<std::string, TyP> payloads;
-            for (const auto& p : sym->payloads) payloads[p.first] = p.second;
-            for (const auto& a : e.args) {
-                TyP at = checkExpr(*a.value);
-                if (!a.name.empty()) {
-                    auto pit = payloads.find(a.name);
-                    if (pit != payloads.end() && !assignable(at, pit->second))
-                        error(a.value->span.line, a.value->span.col,
-                              "payload '" + a.name + "' mismatch");
-                }
-            }
-            auto vt = std::shared_ptr<Ty>(new Ty());
-            vt->k = TyK::EnumVal;
-            vt->name = sym->enumOf;
-            vt->variant = sym->name;
-            return vt;
-        }
+        if (sym && sym->kind == SymK::EnumVariant)
+            return checkEnumCtorCall(sym, e.args);
     }
 
     // generic callee value (lambda / fn-typed / trait-object fn)
     TyP ct = checkExpr(*callee);
+    // enum variant constructed through a member callee: Enum.bad(h: x)
+    if (ct && ct->is(TyK::EnumVal)) {
+        std::map<std::string, TyP> payloads;
+        auto ei = enums_.find(ct->name);
+        if (ei != enums_.end()) {
+            auto vit = ei->second->variantPayloads.find(ct->variant);
+            if (vit != ei->second->variantPayloads.end())
+                for (const auto& pp : vit->second)
+                    payloads[pp.first] = pp.second;
+        }
+        for (const auto& a : e.args) {
+            TyP at = checkExpr(*a.value);
+            if (!a.name.empty()) {
+                auto pit = payloads.find(a.name);
+                if (pit != payloads.end() && !assignable(at, pit->second))
+                    error(a.value->span.line, a.value->span.col,
+                          "payload '" + a.name + "' mismatch");
+            }
+        }
+        return ct;
+    }
     for (const auto& a : e.args) checkExpr(*a.value);
     if (ct && ct->is(TyK::Fn)) {
         FuncSig s;

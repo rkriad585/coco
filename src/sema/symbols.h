@@ -52,6 +52,9 @@ struct Symbol {
     std::vector<std::pair<std::string, TyP>> payloads;
     std::string enumOf;               // EnumVariant -> owning enum name
 
+    // EnumName: variant name -> resolved payload fields
+    std::map<std::string, std::vector<std::pair<std::string, TyP>>> variantPayloads;
+
     int homeScope = 0;                // declaring Scope::id (capture detection)
 };
 
