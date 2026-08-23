@@ -1,0 +1,115 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build-test:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure
+        run: cmake -S . -B build
+
+      - name: Build
+        run: cmake --build build --config Debug
+
+      - name: Corpus (examples/*.co)
+        shell: pwsh
+        run: scripts/runall.ps1 -Runner build\Debug\cocorun.exe
+
+      - name: Bytecode roundtrip (build -B -> cocorun)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $coco = "build\Debug\coco.exe"
+          $run = "build\Debug\cocorun.exe"
+          & $coco targets
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & $coco new demo
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Push-Location demo
+          try {
+            & $coco build -B
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            $cob = Get-ChildItem build -Recurse -Filter demo.cob | Select-Object -First 1
+            if (-not $cob) { Write-Host "::error::no .cob produced"; exit 1 }
+            $out = (& $run $cob.FullName) -join "; "
+            Write-Host "bundle output: $out"
+          } finally { Pop-Location }
+
+      - name: Upload tools
+        uses: actions/upload-artifact@v4
+        with:
+          name: coco-tools
+          path: |
+            build/Debug/coco.exe
+            build/Debug/cocorun.exe
+          retention-days: 1
+          if-no-files-found: error
+
+  cross-arm64:
+    runs-on: windows-latest
+    needs: build-test
+    steps:
+      - uses: actions/checkout@v4
+
+      # flattened by the artifact: lands at build\coco.exe, build\cocorun.exe
+      # (coco resolves its runtime sources at <exe-dir>/../src, so the exe
+      # must sit exactly one level below the checkout root)
+      - name: Download tools
+        uses: actions/download-artifact@v4
+        with:
+          name: coco-tools
+          path: build
+
+      - name: Install llvm-mingw (aarch64 toolchain)
+        shell: pwsh
+        run: |
+          $ver = "20260616"
+          $zip = "$env:RUNNER_TEMP\llvm-mingw-$ver.zip"
+          Invoke-WebRequest -Uri `
+            "https://github.com/mstorsjo/llvm-mingw/releases/download/$ver/llvm-mingw-$ver-ucrt-x86_64.zip" `
+            -OutFile $zip
+          $dest = "$env:RUNNER_TEMP\llvm-mingw"
+          Expand-Archive $zip -DestinationPath $dest
+          Add-Content $env:GITHUB_PATH "$dest\llvm-mingw-$ver-ucrt-x86_64\bin"
+
+      - name: Cross-build ARM64 binary + verify PE header
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          & build\coco.exe targets
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & build\coco.exe new armapp
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Push-Location armapp
+          try {
+            & ..\build\coco.exe build --release --target=windows-arm64
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            $exe = Get-ChildItem build -Recurse -Filter armapp.exe |
+              Where-Object { $_.FullName -match "windows-arm64" } |
+              Select-Object -First 1
+            if (-not $exe) { Write-Host "::error::no ARM64 exe"; exit 1 }
+            $b = [IO.File]::ReadAllBytes($exe.FullName)
+            $peOff = [BitConverter]::ToInt32($b, 0x3C)
+            $mach = [BitConverter]::ToUInt16($b, $peOff + 4)
+            Write-Host ("{0}: machine=0x{1:X4}" -f $exe.Name, $mach)
+            if ($mach -ne 0xAA64) {
+              Write-Host "::error::expected ARM64 (0xAA64) machine type"
+              exit 1
+            }
+
+            # no-toolchain target must fall back to a runnable portable bundle
+            & ..\build\coco.exe build --target=linux-amd64
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            $cob = Get-ChildItem build -Recurse -Filter armapp.cob |
+              Select-Object -First 1
+            if (-not $cob) { Write-Host "::error::no .cob fallback"; exit 1 }
+            $out = (& ..\build\cocorun.exe $cob.FullName) -join "; "
+            Write-Host "bundle output: $out"
+          } finally { Pop-Location }
