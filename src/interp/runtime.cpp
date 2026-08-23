@@ -4,14 +4,19 @@
 // declared without capacity queue unboundedly instead of rendezvous-syncing;
 // weak fields keep their target alive while any strong handle exists.
 #include "interp/runtime.h"
+#include "lex/lexer.h"
+#include "parser/parser.h"
+#include "sema/checker.h"
 
 #include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <sstream>
 
 namespace coco {
 namespace interp {
@@ -357,12 +362,18 @@ void ChanImpl::close() {
 Interpreter::Interpreter(const Stmt& program) {
     globals_ = makeChild(nullptr);
     installBuiltins();
-    collectProgram(program);
+    program_ = &program;
 }
 
 Interpreter::~Interpreter() { shutdownThreads(); }
 
 Value Interpreter::run() {
+    // deferred so hosts can configure module search paths between
+    // construction and execution (imports run during collection)
+    if (!collected_) {
+        collected_ = true;
+        collectProgram(*program_);
+    }
     auto it = funcs_.find("main");
     if (it == funcs_.end()) panicHere("no main() defined");
     Value r = runFunc(it->second, {}, {}, globals_);
@@ -397,10 +408,24 @@ void Interpreter::collectProgram(const Stmt& program) {
                 break;
             case ast::StKind::Import: {
                 if (!s.fromImport) {
-                    auto parts = splitDots(s.moduleName);
-                    globals_->vars[s.importAlias.empty() ? parts[0]
-                                                         : s.importAlias] =
-                        Value::module(parts[0]);
+                    // real module file (project package or stdlib) first
+                    Value real = loadModuleFile(s.moduleName);
+                    if (real.k != VK::None) {
+                        // unaliased imports bind the last path segment
+                        std::string bind = s.importAlias;
+                        if (bind.empty()) {
+                            size_t cut = s.moduleName.find_last_of("/.");
+                            bind = cut == std::string::npos
+                                       ? s.moduleName
+                                       : s.moduleName.substr(cut + 1);
+                        }
+                        globals_->vars[bind] = real;
+                    } else {
+                        auto parts = splitDots(s.moduleName);
+                        globals_->vars[s.importAlias.empty() ? parts[0]
+                                                             : s.importAlias] =
+                            Value::module(parts[0]);
+                    }
                 } else {
                     Value mod = resolveModulePath(s.moduleName);
                     for (const auto& item : s.importItems) {
@@ -463,6 +488,17 @@ void Interpreter::installBuiltins() {
     globals_->vars["sqrt"] = biFn({"x"}, [](std::vector<Value>& a) -> Value {
         double d = a[0].k == VK::Int ? (double)a[0].i : a[0].d;
         return Value::floating(std::sqrt(d));
+    });
+
+    globals_->vars["ord"] = biFn({"c"}, [](std::vector<Value>& a) -> Value {
+        if (a[0].k == VK::Char) return Value::integer((int64_t)a[0].ch);
+        if (a[0].k == VK::Str && !a[0].s.empty())
+            return Value::integer((int64_t)(unsigned char)a[0].s[0]);
+        panicHere("ord() expects a char");
+    });
+    globals_->vars["chr"] = biFn({"n"}, [](std::vector<Value>& a) -> Value {
+        int64_t n = a[0].k == VK::Int ? a[0].i : 0;
+        return Value::chr((char32_t)n);
     });
 
     globals_->vars["range"] = biFn({"start", "stop"},
@@ -536,6 +572,10 @@ void Interpreter::installBuiltins() {
 }
 
 Value Interpreter::resolveModulePath(const std::string& dotted) {
+    // real module files win over native pseudo-module stubs
+    Value real = loadModuleFile(dotted);
+    if (real.k != VK::None) return real;
+
     auto parts = splitDots(dotted);
     Value cur = Value::module(parts[0]);
     std::string acc = parts[0];
@@ -547,6 +587,196 @@ Value Interpreter::resolveModulePath(const std::string& dotted) {
         cur.typeName = acc;
     }
     return cur;
+}
+
+// ---------------------------------------------------------------------------
+// module loader: dotted/slash import paths -> <dir>/<path>.co source files
+// ---------------------------------------------------------------------------
+
+static bool readFileIfExists(const std::string& path, std::string& out) {
+    std::ifstream in(path, std::ios::binary);
+    if (!in) return false;
+    std::ostringstream ss;
+    ss << in.rdbuf();
+    out = ss.str();
+    return true;
+}
+
+// entry-file convention inside an installed package directory:
+//   coco.json "main" -> mod.co -> <dirname>.co -> lone top-level *.co
+static bool resolvePackageEntry(const std::string& dir, std::string& out) {
+    std::string manifest;
+    if (readFileIfExists(dir + "/coco.json", manifest)) {
+        size_t p = manifest.find("\"main\"");
+        if (p != std::string::npos) {
+            size_t c0 = manifest.find('"', manifest.find(':', p) + 1);
+            size_t c1 =
+                c0 == std::string::npos ? std::string::npos
+                                        : manifest.find('"', c0 + 1);
+            if (c0 != std::string::npos && c1 != std::string::npos) {
+                std::string mainf = manifest.substr(c0 + 1, c1 - c0 - 1);
+                std::string probe;
+                if (!mainf.empty() && readFileIfExists(dir + "/" + mainf,
+                                                       probe)) {
+                    out = dir + "/" + mainf;
+                    return true;
+                }
+            }
+        }
+    }
+    const char* defaults[] = {"/mod.co"};
+    for (const char* d : defaults) {
+        std::string probe;
+        if (readFileIfExists(dir + d, probe)) {
+            out = dir + d;
+            return true;
+        }
+    }
+    // <dirname>.co then a single top-level source file
+    std::string base = dir;
+    size_t cut = base.find_last_of("/\\");
+    if (cut != std::string::npos) base = base.substr(cut + 1);
+    std::string probe;
+    std::vector<std::string> tops;
+    if (readFileIfExists(dir + "/" + base + ".co", probe))
+        tops.push_back(dir + "/" + base + ".co");
+    if (tops.empty()) {
+        std::error_code ec;
+        std::filesystem::directory_iterator it(dir, ec), end;
+        if (!ec)
+            for (; it != end; it.increment(ec))
+                if (!ec && it->is_regular_file(ec) &&
+                    it->path().extension() == ".co")
+                    tops.push_back(it->path().string());
+    }
+    if (tops.size() == 1) {
+        out = tops[0];
+        return true;
+    }
+    return false;
+}
+
+Value Interpreter::loadModuleFile(const std::string& dotted) {
+    auto hit = loadedModules_.find(dotted);
+    if (hit != loadedModules_.end()) {
+        Value m = Value::module(dotted);
+        m.typeName = "__loaded__:" + dotted;
+        return m;
+    }
+
+    // import paths may use '.' or '/' separators (stdlib vs github style)
+    std::string rel;
+    for (char c : dotted) rel += (c == '.' || c == '/') ? '/' : c;
+    rel += ".co";
+
+    std::string found;
+    for (const auto& dir : stdlibDirs_) {
+        std::string cand = dir + "/" + rel;
+        std::string probe;
+        if (readFileIfExists(cand, probe)) {
+            found = cand;
+            break;
+        }
+        // package directory (installed under coco_modules/): use its entry file
+        std::string pkgDir = dir + "/" +
+                             rel.substr(0, rel.size() - 3);   // strip ".co"
+        if (!pkgDir.empty() && std::filesystem::is_directory(pkgDir) &&
+            resolvePackageEntry(pkgDir, probe)) {
+            found = probe;
+            break;
+        }
+    }
+    if (found.empty()) {
+        Value missing;
+        missing.k = VK::None;      // sentinel: not a file-backed module
+        return missing;
+    }
+
+    std::string src;
+    readFileIfExists(found, src);
+
+    DiagEngine diags;
+    auto toks = Lexer(src, found, diags).lexAll();
+    std::vector<ast::StmtP> body;
+    if (diags.count() == 0) body = Parser(toks, diags).parseProgram();
+    if (diags.count() == 0) {
+        sema::Checker chk(diags);
+        chk.checkModule(body);
+    }
+    if (diags.count() != 0) {
+        for (const auto& d : diags.diags())
+            std::cerr << found << ":" << d.line << ":" << d.col
+                      << ": error: " << d.message << "\n";
+        panicHere("module '" + dotted + "' failed to compile");
+    }
+
+    // keep the AST alive for the lifetime of the interpreter: bound function
+    // closures point into it
+    auto& prog = moduleAstCache_[dotted];
+    prog = std::move(body);
+
+    Env modEnv = makeChild(globals_);   // builtins visible inside the module
+    for (const auto& sp : prog) {
+        const Stmt& s = *sp;
+        switch (s.kind) {
+            case ast::StKind::FuncDef: {
+                if (s.externDef) break;
+                const Stmt* fn = &s;
+                Value v;
+                v.k = VK::Builtin;
+                v.bi = [this, fn, modEnv](std::vector<Value>& a) -> Value {
+                    return runFunc(fn, a, {}, modEnv, nullptr);
+                };
+                modEnv->vars[s.name] = v;
+                break;
+            }
+            case ast::StKind::ConstDecl:
+            case ast::StKind::VarDecl:
+                modEnv->vars[s.target->text] =
+                    s.value ? eval(*s.value, modEnv) : Value::none();
+                break;
+            case ast::StKind::StructDef:
+                structs_[s.name] = &s;
+                break;
+            case ast::StKind::EnumDef:
+                enums_[s.name] = &s;
+                break;
+            case ast::StKind::Import: {
+                // modules importing other modules bind into their own namespace
+                if (!s.fromImport) {
+                    Value dep = loadModuleFile(s.moduleName);
+                    if (dep.k != VK::None)
+                        modEnv->vars[s.importAlias.empty() ? s.moduleName
+                                                           : s.importAlias] =
+                            dep;
+                    else if (s.importAlias.empty())
+                        modEnv->vars[s.moduleName] =
+                            Value::module(s.moduleName);
+                } else {
+                    Value dep = resolveModulePath(s.moduleName);
+                    for (const auto& item : s.importItems) {
+                        const std::string& bind =
+                            item.alias.empty() ? item.name : item.alias;
+                        if (dep.typeName.rfind("__loaded__:", 0) == 0) {
+                            Value mv = moduleMember(dep.typeName, item.name);
+                            modEnv->vars[bind] = mv;
+                        } else {
+                            modEnv->vars[bind] =
+                                moduleMember(dep.typeName, item.name);
+                        }
+                    }
+                }
+                break;
+            }
+            default:
+                break;
+        }
+    }
+
+    loadedModules_[dotted] = modEnv;
+    Value m = Value::module(dotted);
+    m.typeName = "__loaded__:" + dotted;
+    return m;
 }
 
 static std::string slugifyStr(const std::string& in) {
@@ -611,6 +841,19 @@ static void dumpJson(const Value& v, std::string& out) {
 }
 
 Value Interpreter::moduleMember(const std::string& mod, const std::string& name) {
+    // file-backed modules: look the member up in the module's namespace
+    if (mod.rfind("__loaded__:", 0) == 0) {
+        std::string dotted = mod.substr(11);
+        auto it = loadedModules_.find(dotted);
+        if (it == loadedModules_.end())
+            panicHere("module '" + dotted + "' is not loaded");
+        const Value* mv = it->second->find(name);
+        if (!mv || name.empty() || name[0] == '_')
+            panicHere("module '" + dotted + "' has no exported member '" +
+                      name + "'");
+        return *mv;
+    }
+
     if (mod == "math") {
         if (name == "pi") return Value::floating(3.14159265358979323846);
         if (name == "e")  return Value::floating(2.71828182845904523536);
@@ -2337,6 +2580,12 @@ Value Interpreter::binop(const std::string& op, const Value& l, const Value& r,
             (r.k == VK::Int || r.k == VK::Float))
             return Value::floating(numL() + numR());
         if (l.k == VK::Str && r.k == VK::Str) return Value::str(l.s + r.s);
+        if (l.k == VK::Str && r.k == VK::Char)
+            return Value::str(l.s + toStr(r));
+        if (l.k == VK::Char && r.k == VK::Str)
+            return Value::str(toStr(l) + r.s);
+        if (l.k == VK::Char && r.k == VK::Char)
+            return Value::str(toStr(l) + toStr(r));
         if (l.k == VK::List && r.k == VK::List) {
             std::vector<Value> out = *l.vec;
             for (auto& el : *r.vec) out.push_back(el);

@@ -50,6 +50,9 @@ target_link_libraries(cococheck PRIVATE coco_sema)
 add_executable(cocorun tools/cocorun.cpp)
 target_link_libraries(cocorun PRIVATE coco_interp)
 
+add_executable(coco tools/coco.cpp)
+target_link_libraries(coco PRIVATE coco_interp)
+
 foreach(tgt coco_lex coco_ast coco_parser coco_sema)
     if(MSVC)
         target_compile_options(${tgt} PRIVATE /W4 /permissive-)

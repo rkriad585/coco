@@ -82,6 +82,8 @@ private:
 
     // ---- setup -----------------------------------------------------------------
     void collectProgram(const Stmt& program);
+    const Stmt* program_ = nullptr;
+    bool collected_ = false;
 
     // ---- statements / expressions ----------------------------------------------
     void execBlock(const std::vector<ast::StmtP>& body, Env env);
@@ -126,6 +128,11 @@ private:
     void installBuiltins();
     Value resolveModulePath(const std::string& dotted);
     Value moduleMember(const std::string& mod, const std::string& name);
+    // real stdlib: load <dir>/<dotted/path>.co as an isolated module namespace
+    std::vector<std::string> stdlibDirs_;
+    std::map<std::string, Env> loadedModules_;
+    std::map<std::string, std::vector<ast::StmtP>> moduleAstCache_;
+    Value loadModuleFile(const std::string& dotted);
     Value formatFString(const Expr& e, Env env);
     std::string applySpec(const std::string& text, const std::string& spec);
     Value sortList(Value listVal, const std::vector<ast::CallArg>& args, Env env);
@@ -138,6 +145,8 @@ private:
 public:
     // entry used by spawned threads
     void threadEntry(Value callee, std::vector<Value> args);
+    // directories searched for stdlib modules (dotted imports -> files)
+    void addStdlibDir(const std::string& dir) { stdlibDirs_.push_back(dir); }
 };
 
 } // namespace interp

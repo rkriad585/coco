@@ -7,6 +7,7 @@
 #include "sema/checker.h"
 
 #include <cstdio>
+#include <cstdlib>
 #include <fstream>
 #include <iostream>
 #include <sstream>
@@ -25,6 +26,24 @@ bool readFile(const std::string& path, std::string& out) {
     ss << in.rdbuf();
     out = ss.str();
     return true;
+}
+
+// Module search paths, in priority order:
+//   1. $COCO_MODULES   (per-project package cache, node_modules style)
+//   2. <script dir>/coco_modules
+//   3. <script dir>/../stdlib   (repo checkout layout)
+//   4. ./stdlib
+//   5. $COCO_STDLIB
+void addModuleDirs(coco::interp::Interpreter& interp,
+                   const std::string& script) {
+    size_t p = script.find_last_of("/\\");
+    std::string dir = p == std::string::npos ? "." : script.substr(0, p);
+    if (const char* env = std::getenv("COCO_MODULES"))
+        interp.addStdlibDir(env);
+    interp.addStdlibDir(dir + "/coco_modules");
+    interp.addStdlibDir(dir + "/../stdlib");
+    interp.addStdlibDir("stdlib");
+    if (const char* env = std::getenv("COCO_STDLIB")) interp.addStdlibDir(env);
 }
 
 } // namespace
@@ -65,6 +84,7 @@ int main(int argc, char** argv) {
 
             try {
                 coco::interp::Interpreter interp(module);
+                addModuleDirs(interp, file);
                 coco::interp::Value r = interp.run();
                 return r.k == coco::interp::VK::Int ? (int)r.i : 0;
             } catch (const coco::interp::PanicSignal& p) {

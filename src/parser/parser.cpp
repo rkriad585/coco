@@ -398,10 +398,17 @@ ast::StmtP Parser::parseImport(bool from, bool exportKw) {
     if (exportKw) advance();
 
     auto dottedName = [&]() {
+        // quoted module path (Go style): import "github.com/user/repo"
+        if (cur().kind == Tok::StrNormal || cur().kind == Tok::StrRaw) {
+            s->moduleName = advance().text;
+            return;
+        }
         for (;;) {
             if (cur().kind == Tok::Ident && !atIdent("as") && !atIdent("import")) {
                 s->moduleName += advance().text;
             } else if (atPunct(".")) {
+                s->moduleName += advance().text;
+            } else if (atPunct("/")) {
                 s->moduleName += advance().text;
             } else {
                 break;

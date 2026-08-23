@@ -254,6 +254,8 @@ void Checker::predeclareBuiltins() {
     makeBuiltinFunc("catch_panic", {unkTy()}, {"thunk"},
                     nominalWithArgs(TyK::Struct, "result", {unkTy(), unkTy()}),
                     false, 1);
+    makeBuiltinFunc("ord", {charTy()}, {"c"}, intTy(), false, 1);
+    makeBuiltinFunc("chr", {intTy()}, {"n"}, charTy(), false, 1);
 
     // keyword constants
     declareConst("true", boolTy());
@@ -1585,7 +1587,10 @@ TyP Checker::checkExpr(const ast::Expr& e) {
             if (op == "+" || op == "-" || op == "*" || op == "/" || op == "%" ||
                 op == "**" || op == "//") {
                 if (op == "+") {
-                    bool strcat = lt->is(TyK::Str) && rt->is(TyK::Str);
+                    auto isStrish = [](const TyP& t) {
+                        return t->is(TyK::Str) || t->is(TyK::Char);
+                    };
+                    bool strcat = isStrish(lt) && isStrish(rt);
                     bool listcat = lt->is(TyK::List) && rt->is(TyK::List);
                     if (strcat) return strTy();
                     if (listcat)
