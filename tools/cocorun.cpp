@@ -1,5 +1,8 @@
-// cocorun: lex + parse + semantic-check + interpret a Coco source file.
-//   cocorun <file.co> [args...]   run program; main()'s Int return is the
+// cocorun: lex + parse + semantic-check + interpret a Coco source file,
+// or execute a self-contained bytecode bundle (.cob) produced by
+// `coco build -B` / cross-target fallbacks.
+//   cocorun <file.co | file.cob> [args...]
+//                                 run program; main()'s Int return is the
 //                                 process exit code (default 0)
 #include "interp/runtime.h"
 #include "lex/lexer.h"
@@ -10,6 +13,7 @@
 #include <cstdlib>
 #include <fstream>
 #include <iostream>
+#include <map>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -60,19 +64,120 @@ void addModuleDirs(coco::interp::Interpreter& interp,
 
 } // namespace
 
+// .cob container reader (see tools/coco.cpp emitCob for the writer)
+static bool unpackCob(const std::string& path, std::string& mainSrc,
+                      std::map<std::string, std::string>& embedded) {
+    std::ifstream in(path, std::ios::binary);
+    if (!in) return false;
+    std::ostringstream ss;
+    ss << in.rdbuf();
+    const std::string b = ss.str();
+    auto u32at = [&](size_t off, uint32_t& v) {
+        if (off + 4 > b.size()) return false;
+        v = (uint8_t)b[off] | ((uint16_t)(uint8_t)b[off + 1] << 8) |
+            ((uint32_t)(uint8_t)b[off + 2] << 16) |
+            ((uint32_t)(uint8_t)b[off + 3] << 24);
+        return true;
+    };
+    if (b.size() < 10 || b.compare(0, 5, "COCOB") != 0 || b[5] != 1)
+        return false;
+    uint32_t count = 0;
+    if (!u32at(6, count)) return false;
+    size_t off = 10;
+    bool haveMain = false;
+    for (uint32_t i = 0; i < count; ++i) {
+        uint32_t nl = 0, sl = 0;
+        if (!u32at(off, nl)) return false;
+        off += 4;
+        if (off + nl > b.size()) return false;
+        std::string name = b.substr(off, nl);
+        off += nl;
+        if (!u32at(off, sl)) return false;
+        off += 4;
+        if (off + sl > b.size()) return false;
+        std::string esrc = b.substr(off, sl);
+        off += sl;
+        if (name == "main") {
+            mainSrc = std::move(esrc);
+            haveMain = true;
+        } else {
+            embedded[std::move(name)] = std::move(esrc);
+        }
+    }
+    return haveMain;
+}
+
+// shared pipeline: front-end + interpret, with panic handling
+static int runSources(const std::string& label, const std::string& src,
+                      const std::map<std::string, std::string>* embedded) {
+    coco::DiagEngine diags;
+    auto toks = coco::Lexer(src, label, diags).lexAll();
+    if (diags.count() == 0) {
+        auto body = coco::Parser(toks, diags).parseProgram();
+        if (diags.count() == 0) {
+            coco::sema::Checker checker(diags);
+            checker.checkModule(body);
+            if (diags.count() == 0) {
+                coco::ast::Stmt module;
+                module.kind = coco::ast::StKind::Pass;
+                module.body = std::move(body);
+                try {
+                    coco::interp::Interpreter interp(module);
+                    addModuleDirs(interp, label);
+                    if (embedded)
+                        for (const auto& [name, esrc] : *embedded)
+                            interp.addEmbeddedSource(name, esrc);
+                    coco::interp::Value r = interp.run();
+                    return r.k == coco::interp::VK::Int ? (int)r.i : 0;
+                } catch (const coco::interp::PanicSignal& p) {
+                    fflush(stdout);
+                    fputs(("panic: " + p.msg + "\n").c_str(), stderr);
+                    return 70;
+                } catch (const coco::interp::SignalRaise&) {
+                    fflush(stdout);
+                    fputs("panic: uncaught raise escaped main\n", stderr);
+                    return 70;
+                }
+            }
+        }
+    }
+    for (const auto& d : diags.diags())
+        std::cout << label << ":" << d.line << ":" << d.col
+                  << ": error: " << d.message << "\n";
+    if (diags.count() != 0) {
+        std::cout << label << ": " << diags.count() << " error(s)\n";
+        return 1;
+    }
+    return 0;
+}
+
 int main(int argc, char** argv) {
     std::string file;
     for (int i = 1; i < argc; ++i) {
         std::string a = argv[i];
         if (a == "-h" || a == "--help") {
-            std::cout << "usage: cocorun <file.co>\n";
+            std::cout << "usage: cocorun <file.co | file.cob>\n";
             return 0;
         }
         if (file.empty()) file = a;
     }
     if (file.empty()) {
-        std::cerr << "usage: cocorun <file.co>\n";
+        std::cerr << "usage: cocorun <file.co | file.cob>\n";
         return 2;
+    }
+
+    // bytecode bundle path
+    size_t dot = file.find_last_of('.');
+    std::string ext = dot == std::string::npos ? "" : file.substr(dot);
+    for (auto& c : ext) c = (char)tolower((unsigned char)c);
+    if (ext == ".cob") {
+        std::string msrc;
+        std::map<std::string, std::string> emb;
+        if (!unpackCob(file, msrc, emb)) {
+            std::cerr << "cocorun: invalid bytecode bundle '" << file << "'\n";
+            return 66;
+        }
+        return runSources(file, msrc, &emb);
     }
 
     std::string src;

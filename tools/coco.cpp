@@ -412,18 +412,60 @@ void printDiags(const std::string& path, const coco::DiagEngine& diags) {
                   << ": error: " << d.message << "\n";
 }
 
-int runProgram(const std::string& entryPath,
-               const std::vector<std::string>& dirs,
-               const std::map<std::string, std::string>& embedded = {}) {
-    std::string src;
-    if (!readFile(entryPath, src)) {
-        std::cerr << "coco: cannot read '" << entryPath << "'\n";
-        return 66;
+// ---- bytecode bundles (.cob): reader ---------------------------------------
+// Mirrors emitCob's layout: "COCOB" + u8 ver(1) + u32 count, then per entry
+//   u32 nameLen | name | u32 srcLen | utf8 src
+// The entry named "main" is the program; everything else is an embedded
+// module keyed by its normalized module name.
+bool unpackCob(const std::string& path, std::string& mainSrc,
+               std::map<std::string, std::string>& embedded) {
+    std::ifstream in(path, std::ios::binary);
+    if (!in) return false;
+    std::ostringstream ss;
+    ss << in.rdbuf();
+    const std::string b = ss.str();
+    auto u32at = [&](size_t off, uint32_t& v) {
+        if (off + 4 > b.size()) return false;
+        v = (uint8_t)b[off] | ((uint16_t)(uint8_t)b[off + 1] << 8) |
+            ((uint32_t)(uint8_t)b[off + 2] << 16) |
+            ((uint32_t)(uint8_t)b[off + 3] << 24);
+        return true;
+    };
+    if (b.size() < 10 || b.compare(0, 5, "COCOB") != 0 || b[5] != 1)
+        return false;
+    uint32_t count = 0;
+    if (!u32at(6, count)) return false;
+    size_t off = 10;
+    bool haveMain = false;
+    for (uint32_t i = 0; i < count; ++i) {
+        uint32_t nl = 0, sl = 0;
+        if (!u32at(off, nl)) return false;
+        off += 4;
+        if (off + nl > b.size()) return false;
+        std::string name = b.substr(off, nl);
+        off += nl;
+        if (!u32at(off, sl)) return false;
+        off += 4;
+        if (off + sl > b.size()) return false;
+        std::string esrc = b.substr(off, sl);
+        off += sl;
+        if (name == "main") {
+            mainSrc = std::move(esrc);
+            haveMain = true;
+        } else {
+            embedded[std::move(name)] = std::move(esrc);
+        }
     }
+    return haveMain;
+}
+
+int runProgramSrc(const std::string& label, const std::string& src,
+                  const std::vector<std::string>& dirs,
+                  const std::map<std::string, std::string>& embedded) {
     coco::DiagEngine diags;
-    auto body = frontEnd(entryPath, src, diags);
+    auto body = frontEnd(label, src, diags);
     if (diags.count()) {
-        printDiags(entryPath, diags);
+        printDiags(label, diags);
         return 65;
     }
     coco::ast::Stmt root;
@@ -448,6 +490,17 @@ int runProgram(const std::string& entryPath,
         std::cerr << "internal error: " << ex.what() << "\n";
         return 70;
     }
+}
+
+int runProgram(const std::string& entryPath,
+               const std::vector<std::string>& dirs,
+               const std::map<std::string, std::string>& embedded = {}) {
+    std::string src;
+    if (!readFile(entryPath, src)) {
+        std::cerr << "coco: cannot read '" << entryPath << "'\n";
+        return 66;
+    }
+    return runProgramSrc(entryPath, src, dirs, embedded);
 }
 
 // ---------------------------------------------------------------------------
@@ -2697,6 +2750,8 @@ void usage() {
         << "coco - the Coco language driver\n\n"
         << "usage:\n"
         << "  coco run [dir|file]              run a program or project\n"
+        << "  coco run <file.co|.cob>          run a script or bytecode bundle"
+               "\n"
         << "  coco new <name>                  scaffold an application\n"
         << "  coco new lib <name>              scaffold a library package\n"
         << "  coco test [.|file|dir ...]       run *_test.co files\n"
@@ -2744,6 +2799,17 @@ int main(int argc, char** argv) {
     if ((cmd == "run" || cmd == "r") && args.size() <= 2) {
         std::string target = args.size() == 2 ? args[1] : ".";
         fs::path file(target);
+        // bytecode bundle: fully self-contained, no sources or libs needed
+        if (file.extension() == ".cob") {
+            std::string msrc;
+            std::map<std::string, std::string> emb;
+            if (!unpackCob(file.string(), msrc, emb)) {
+                std::cerr << "coco: invalid bytecode bundle '" << file.string()
+                          << "'\n";
+                return 66;
+            }
+            return runProgramSrc(file.string(), msrc, {}, emb);
+        }
         if (fs::is_directory(file)) {
             Manifest m = readManifest(file);
             file /= m.main.empty() ? fs::path("code/main.co") : fs::path(m.main);
