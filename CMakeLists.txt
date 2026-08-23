@@ -33,6 +33,11 @@ add_library(coco_sema STATIC
 )
 target_link_libraries(coco_sema PUBLIC coco_parser)
 
+add_library(coco_interp STATIC
+    src/interp/runtime.cpp
+)
+target_link_libraries(coco_interp PUBLIC coco_sema)
+
 add_executable(cocolex tools/cocolex.cpp)
 target_link_libraries(cocolex PRIVATE coco_lex)
 
@@ -41,6 +46,9 @@ target_link_libraries(cocoparse PRIVATE coco_parser)
 
 add_executable(cococheck tools/cococheck.cpp)
 target_link_libraries(cococheck PRIVATE coco_sema)
+
+add_executable(cocorun tools/cocorun.cpp)
+target_link_libraries(cocorun PRIVATE coco_interp)
 
 foreach(tgt coco_lex coco_ast coco_parser coco_sema)
     if(MSVC)

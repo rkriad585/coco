@@ -639,8 +639,8 @@ Token Lexer::scanFText() {
             specActive_ = false;
             specBuf_.clear();
             if (run.empty()) return lb;
-            queue_.push_back(std::move(lb));
-            return textTok(std::move(run));
+            queue_.push_back(textTok(std::move(run)));
+            return lb;
         }
         if (c == '}') {
             if (peek(1) == '}') {                       // }} -> literal }
