@@ -30,22 +30,29 @@ bool readFile(const std::string& path, std::string& out) {
 
 // Module search paths, in priority order:
 //   1. $COCO_LIBS
-//   2. <script dir>/coco_libs   (per-project packages)
-//   3. ~/.coco/coco-pkg         (global installs)
-//   4. <script dir>/../stdlib   (repo checkout layout)
-//   5. ./stdlib
-//   6. $COCO_STDLIB
+//   2. <script dir>/coco_libs/libs  (per-project packages)
+//   3. <script dir>/coco_libs       (legacy layout)
+//   4. ~/.coco/coco-pkg/{libs,/}    (global installs; libs/ preferred)
+//   5. <script dir>/../stdlib       (repo checkout layout)
+//   6. ./stdlib
+//   7. $COCO_STDLIB
 void addModuleDirs(coco::interp::Interpreter& interp,
                    const std::string& script) {
     size_t p = script.find_last_of("/\\");
     std::string dir = p == std::string::npos ? "." : script.substr(0, p);
     if (const char* env = std::getenv("COCO_LIBS"))
         interp.addStdlibDir(env);
+    interp.addStdlibDir(dir + "/coco_libs/libs");
     interp.addStdlibDir(dir + "/coco_libs");
-    if (const char* home = std::getenv("USERPROFILE"))
-        interp.addStdlibDir(std::string(home) + "/.coco/coco-pkg");
-    else if (const char* home2 = std::getenv("HOME"))
-        interp.addStdlibDir(std::string(home2) + "/.coco/coco-pkg");
+    if (const char* home = std::getenv("USERPROFILE")) {
+        std::string g = std::string(home) + "/.coco/coco-pkg";
+        interp.addStdlibDir(g + "/libs");
+        interp.addStdlibDir(g);
+    } else if (const char* home2 = std::getenv("HOME")) {
+        std::string g = std::string(home2) + "/.coco/coco-pkg";
+        interp.addStdlibDir(g + "/libs");
+        interp.addStdlibDir(g);
+    }
     interp.addStdlibDir(dir + "/../stdlib");
     interp.addStdlibDir("stdlib");
     if (const char* env = std::getenv("COCO_STDLIB")) interp.addStdlibDir(env);

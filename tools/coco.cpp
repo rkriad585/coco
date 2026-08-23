@@ -22,9 +22,12 @@
 #include "sema/checker.h"
 #include "util/tomlmini.h"
 
+#include <algorithm>
 #include <chrono>
+#include <cctype>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -36,8 +39,12 @@
 
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
 #include <winsock2.h>
 #include <ws2tcpip.h>
+#include <windows.h>   // GetEnvironmentVariableA (PATH auto-setup)
 #endif
 
 namespace fs = std::filesystem;
@@ -95,7 +102,11 @@ struct Manifest {
     std::string name, version = "0.1.0", type = "app", main, description,
                 license;
     std::string docs = "docs/index.md";   // docs entry file ([package] docs)
-    std::vector<std::string> authors, tags;
+    std::string author, repo, readme = "README.md", homepage;
+    std::vector<std::string> authors, tags, keywords;
+    // [git] — files generated for new repos
+    bool gitignore = true, gitkeep = false;
+    std::vector<std::string> gitIgnoreExtra;   // additional ignore patterns
     Deps deps;
 };
 
@@ -111,9 +122,31 @@ Manifest readManifest(const fs::path& dir) {
     m.docs = coco::tomlmini::get(d, "package", "docs", "docs/index.md");
     m.description = coco::tomlmini::get(d, "package", "description");
     m.license = coco::tomlmini::get(d, "package", "license");
+    m.author = coco::tomlmini::get(d, "package", "author");
+    m.repo = coco::tomlmini::get(d, "package", "repo");
+    m.readme = coco::tomlmini::get(d, "package", "readme", "README.md");
+    m.homepage = coco::tomlmini::get(d, "package", "homepage");
+    m.gitignore = coco::tomlmini::get(d, "git", "gitignore", "true") != "false";
+    m.gitkeep = coco::tomlmini::get(d, "git", "gitkeep", "false") == "true";
+    {
+        std::string extra = coco::tomlmini::get(d, "git", "ignore", "");
+        size_t a = extra.find('[');
+        size_t b = extra.rfind(']');
+        if (a != std::string::npos && b != std::string::npos) {
+            std::string body = extra.substr(a + 1, b - a - 1), cur;
+            bool q = false;
+            for (char c : body) {
+                if (c == '"') q = !q;
+                if (c == ',' && !q) { m.gitIgnoreExtra.push_back(coco::tomlmini::strip(cur)); cur.clear(); }
+                else cur += c;
+            }
+            m.gitIgnoreExtra.push_back(coco::tomlmini::strip(cur));
+        }
+    }
     for (const auto& [k, v] : d.kv) {
         if (k.rfind("package.authors", 0) == 0 ||
-            k.rfind("package.tags", 0) == 0) {
+            k.rfind("package.tags", 0) == 0 ||
+            k.rfind("package.keywords", 0) == 0) {
             // inline arrays ["a", "b"]
             size_t a = v.find('['), b = v.rfind(']');
             if (a == std::string::npos || b == std::string::npos) continue;
@@ -135,7 +168,9 @@ Manifest readManifest(const fs::path& dir) {
                 if (s.size() >= 2 && s.front() == '"' && s.back() == '"')
                     s = s.substr(1, s.size() - 2);
                 if (!s.empty())
-                    (k.rfind("package.tags", 0) == 0 ? m.tags : m.authors)
+                    (k.rfind("package.tags", 0) == 0 ? m.tags
+                     : k.rfind("package.keywords", 0) == 0 ? m.keywords
+                                                           : m.authors)
                         .push_back(s);
             }
         }
@@ -168,8 +203,24 @@ void writeManifest(const fs::path& dir, const Manifest& m) {
         o << "description = " << coco::tomlmini::quote(m.description) << "\n";
     if (!m.license.empty())
         o << "license = " << coco::tomlmini::quote(m.license) << "\n";
+    if (!m.author.empty())
+        o << "author = " << coco::tomlmini::quote(m.author) << "\n";
     if (!m.authors.empty()) o << "authors = " << tomlArray(m.authors) << "\n";
+    if (!m.repo.empty()) o << "repo = " << coco::tomlmini::quote(m.repo) << "\n";
+    if (!m.homepage.empty())
+        o << "homepage = " << coco::tomlmini::quote(m.homepage) << "\n";
+    if (!m.readme.empty() && m.readme != "README.md")
+        o << "readme = " << coco::tomlmini::quote(m.readme) << "\n";
     if (!m.tags.empty()) o << "tags = " << tomlArray(m.tags) << "\n";
+    if (!m.keywords.empty())
+        o << "keywords = " << tomlArray(m.keywords) << "\n";
+    if (!m.gitignore || m.gitkeep || !m.gitIgnoreExtra.empty()) {
+        o << "\n[git]\n";
+        if (!m.gitignore) o << "gitignore = false\n";
+        if (m.gitkeep) o << "gitkeep = true\n";
+        if (!m.gitIgnoreExtra.empty())
+            o << "ignore = " << tomlArray(m.gitIgnoreExtra) << "\n";
+    }
     o << "\n[dependencies]\n";
     for (const auto& [name, spec] : m.deps) {
         if (spec.size() == 1 && spec.count("version"))
@@ -289,13 +340,53 @@ std::vector<std::string> libDirsFor(const std::string& script) {
     if (const char* env = std::getenv("COCO_LIBS")) dirs.push_back(env);
     size_t p = script.find_last_of("/\\");
     std::string dir = p == std::string::npos ? "." : script.substr(0, p);
+    // type-aware package roots: libs under <base>/libs, apps shimmed into
+    // <base>/bin; the bare roots stay for backward compatibility.
+    dirs.push_back(dir + "/coco_libs/libs");
     dirs.push_back(dir + "/coco_libs");
-    if (!globalPkgDir().empty()) dirs.push_back(globalPkgDir());
+    if (!globalPkgDir().empty()) {
+        dirs.push_back(globalPkgDir() + "/libs");
+        dirs.push_back(globalPkgDir());
+    }
     dirs.push_back(dir + "/../stdlib");
     dirs.push_back(dir + "/../../stdlib");
     if (const char* env = std::getenv("COCO_STDLIB")) dirs.push_back(env);
     dirs.push_back(dir);   // a project/package can import itself
     return dirs;
+}
+
+// install destinations, by package type:
+//   lib -> <base>/libs/<name>   app -> <base>/apps/<name> (+ bin shim)
+fs::path pkgBase(bool global_) {
+    if (global_) {
+        std::string g = globalPkgDir();
+        return g.empty() ? fs::path(".coco-pkg") : fs::path(g);
+    }
+    return fs::path("coco_libs");
+}
+fs::path pkgLibRoot(bool global_) { return pkgBase(global_) / "libs"; }
+
+// append dir to the USER Path (registry-backed; survives new shells).
+bool ensureUserPathContains(const std::string& dirRaw) {
+    std::string dir = dirRaw;
+    std::replace(dir.begin(), dir.end(), '/', '\\');
+    char buf[32767];
+    size_t n = 0;
+    if (GetEnvironmentVariableA("PATH", buf, sizeof(buf)))
+        for (const char* s = buf; *s;) {
+            std::string part;
+            while (*s && *s != ';') part += *s++;
+            if (_stricmp(part.c_str(), dir.c_str()) == 0) return true;
+            if (*s) ++s;
+        }
+    (void)n;
+    std::string ps =
+        "powershell -NoProfile -Command \"$p=[Environment]::"
+        "GetEnvironmentVariable('Path','User'); if($p -notlike '*"
+        + dir +
+        "*'){[Environment]::SetEnvironmentVariable('Path', $p.TrimEnd(';')+';"
+        + dir + "','User')}\"";
+    return std::system(ps.c_str()) == 0;
 }
 
 // ---------------------------------------------------------------------------
@@ -383,8 +474,27 @@ int cmdNew(const std::string& name, bool lib) {
     m.description = lib ? "A Coco library" : "A Coco application";
     m.license = "MIT";
     m.docs = "docs/index.md";
+    m.readme = "README.md";
+    m.author = "Your Name <you@example.com>";
+    m.repo = "github.com/coco-lib/" + name;
+    m.homepage = "https://github.com/coco-lib/" + name;
     m.authors.push_back("Your Name <you@example.com>");
-    if (lib) m.tags.push_back("utility");
+    if (lib) {
+        m.tags.push_back("utility");
+        m.keywords.push_back("coco");
+        m.keywords.push_back(name);
+    }
+    m.gitIgnoreExtra.push_back(".coco-registry-lib.toml");
+
+    const std::string gitignore =
+        "# coco build output\n"
+        "build/\n"
+        "# installed dependencies\n"
+        "coco_libs/\n"
+        "# cached registry copy\n"
+        ".coco-registry-lib.toml\n"
+        "# editor/OS noise\n"
+        ".vscode/\n.idea/\n*.swp\nThumbs.db\n.DS_Store\n";
 
     if (lib) {
         m.main = "code/" + name + ".co";
@@ -439,7 +549,7 @@ int cmdNew(const std::string& name, bool lib) {
                       " authors\n\nPermission is hereby granted, free of "
                       "charge, to any person obtaining a copy of this software "
                       "to deal in the Software without restriction.\n");
-        writeFile(root / ".gitignore", "build/\n");
+        writeFile(root / ".gitignore", gitignore);
 
         std::cout << "created library '" << name << "'\n"
                   << "  " << name << "/coco.toml      manifest\n"
@@ -470,7 +580,7 @@ int cmdNew(const std::string& name, bool lib) {
         writeFile(root / "README.md",
                   "# " + name + "\n\n" + m.description +
                       ".\n\n## Run\n\n```bash\ncoco run\n```\n");
-        writeFile(root / ".gitignore", "build/\ncoco_libs/\n");
+        writeFile(root / ".gitignore", gitignore);
 
         std::cout << "created project '" << name << "'\n"
                   << "  " << name << "/coco.toml      manifest\n"
@@ -520,7 +630,12 @@ bool parsePkgRef(const std::string& raw, PkgRef& ref) {
         }
         ref.kind = PkgRef::Kind::Path;
         ref.spec = fs::absolute(asPath).string();
-        ref.destName = lastSegment(trimSlashes(spec));
+        {   // prefer the manifest name over the folder name
+            Manifest pm = readManifest(asPath);
+            ref.destName = !pm.name.empty()
+                               ? pm.name
+                               : lastSegment(trimSlashes(spec));
+        }
     } else {
         size_t slashes = std::count(spec.begin(), spec.end(), '/');
         if (slashes == 1) spec = "github.com/" + spec;   // user/repo shorthand
@@ -626,45 +741,94 @@ void upsertLock(std::vector<LockEntry>& locks, LockEntry e) {
     locks.push_back(e);
 }
 
-int cmdInstall(const std::string& raw, bool global_) {
-    // .cocolib bundle?
-    if (fs::is_regular_file(raw) && fs::path(raw).extension() == ".cocolib")
-        return 99;   // replaced below by unpackCocolib path
+int installOne(const PkgRef& ref, const std::string& raw, bool global_,
+               bool record, int depth = 0);
 
-    PkgRef ref;
-    // bare name -> look it up in the coco-libs registry
-    bool isBareName =
-        raw.find('/') == std::string::npos && raw.find('\\') == std::string::npos &&
-        raw.find(':') == std::string::npos && !raw.empty() &&
-        raw[0] != '.' && !fs::is_directory(raw);
-    if (isBareName) {
-        std::string url;
-        if (!lookupRegistry(raw, url)) {
-            std::cerr << "coco install: '" << raw
-                      << "' not found in the coco-libs registry\n"
-                      << "  browse: https://github.com/coco-lib/coco-libs\n";
-            return 1;
-        }
-        ref.kind = PkgRef::Kind::Git;
-        ref.spec = url;
-        ref.destName = raw;
-    } else if (!parsePkgRef(raw, ref)) {
-        return 1;
+// install the [dependencies] declared by the package at pkgDir
+static void installPkgDeps(const Manifest& pkg, const fs::path& pkgDir,
+                           bool global_, int depth) {
+    if (depth > 8) return;
+    for (const auto& [name, spec] : pkg.deps) {
+        // already present in the target root?
+        if (fs::exists(pkgLibRoot(global_) / name)) continue;
+        PkgRef dref;
+        dref.destName = name;
+        if (spec.count("path")) {
+            fs::path p = fs::path(spec.at("path"));
+            if (p.is_relative()) p = pkgDir / p;
+            if (!fs::exists(p)) {
+                std::cerr << "  warning: dependency '" << name
+                          << "' path not found: " << p.string() << "\n";
+                continue;
+            }
+            dref.kind = PkgRef::Kind::Path;
+            dref.spec = p.string();
+        } else if (spec.count("git")) {
+            dref.kind = PkgRef::Kind::Git;
+            dref.spec = spec.at("git");
+            if (spec.count("tag")) dref.tag = spec.at("tag");
+        } else if (spec.count("version")) {
+            std::string url;
+            if (!lookupRegistry(name, url)) continue;
+            dref.kind = PkgRef::Kind::Git;
+            dref.spec = url;
+        } else
+            continue;
+        installOne(dref, dref.spec, global_, /*record=*/false, depth + 1);
     }
+}
 
-    fs::path base = global_ ? fs::path(globalPkgDir())
-                            : fs::path("coco_libs");
-    if (global_) {
-        std::error_code ec;
-        fs::create_directories(base / "bin", ec);
-    }
-    const fs::path dest = base / ref.destName;
+// Install one resolved reference. Returns process exit code.
+// Type-aware layout (like cargo/npm hybrids):
+//   lib -> <base>/libs/<name>          (importable)
+//   app -> <base>/libs/<name>          (sources stay importable/runnable)
+//          + <base>/bin/<name>.cmd     (shim launcher)
+//          + global installs append <base>/bin to the USER Path
+int installOne(const PkgRef& ref, const std::string& raw, bool global_,
+               bool record, int depth) {
+    fs::path base = pkgBase(global_);
+    const fs::path libDest = pkgLibRoot(global_) / ref.destName;
+    const fs::path binDir = base / "bin";
 
     Manifest pkg;
     std::string sha;
-    if (!materializePackage(ref, dest, pkg, sha)) return 1;
+    if (!materializePackage(ref, libDest, pkg, sha)) return 1;
 
-    if (!global_) {
+    // bring the package's own dependencies along (transitively)
+    if (!pkg.deps.empty()) installPkgDeps(pkg, libDest, global_, depth);
+
+    bool isApp = pkg.type == "app";
+    if (isApp) {
+        std::error_code ec;
+        fs::create_directories(binDir, ec);
+        // resolve this coco executable so the shim works off-PATH too
+        char cocoBuf[MAX_PATH * 2];
+        GetModuleFileNameA(nullptr, cocoBuf, sizeof cocoBuf);
+        std::string cocoExe = cocoBuf;
+        for (char& c : cocoExe)
+            if (c == '/') c = '\\';
+        fs::path absLib = fs::weakly_canonical(libDest, ec);
+        if (absLib.empty()) absLib = fs::absolute(libDest);
+        std::ostringstream sh;
+        sh << "@echo off\r\n"
+           << "\"" << cocoExe << "\" run \""
+           << absLib.string() << "\" %*\r\n";
+        writeFile(binDir / (ref.destName + ".cmd"), sh.str());
+        if (global_) {
+            if (ensureUserPathContains((fs::absolute(binDir) / "").string()))
+                std::cout << "  PATH updated - restart your shell to use '"
+                          << ref.destName << "' anywhere\n";
+            else
+                std::cerr << "  warning: could not update PATH\n";
+        } else {
+            std::cout << "  app shim: "
+                      << (fs::absolute(binDir) / (ref.destName + ".cmd"))
+                             .string()
+                      << "\n";
+        }
+    }
+
+    if (!global_ && record) {
         // record dependency + lock entry in this project
         Manifest proj = readManifest(".");
         Deps::mapped_type spec;
@@ -689,12 +853,123 @@ int cmdInstall(const std::string& raw, bool global_) {
         writeLock(".", locks);
     }
 
-    std::cout << "installed " << (ref.kind == PkgRef::Kind::Path ? raw : ref.spec);
+    std::cout << (record ? "installed " : "installed ")
+              << (ref.kind == PkgRef::Kind::Path ? raw : ref.spec);
     if (!ref.tag.empty()) std::cout << "@" << ref.tag;
-    std::cout << " (" << (pkg.version.empty() ? "?" : pkg.version) << ") -> "
-              << (dest / "").string()
+    std::cout << " (" << (pkg.version.empty() ? "?" : pkg.version) << ", "
+              << (isApp ? "app" : "lib") << ") -> " << (libDest / "").string()
               << (global_ ? "  [global]" : "") << "\n";
     return 0;
+}
+
+// resolve a raw spec (bare registry name | path | user/repo | .cocolib)
+static bool resolveRaw(const std::string& raw, PkgRef& ref);
+int unpackCocolib(const std::string& raw, bool global_);
+int unpackCocolib(const std::string& raw, bool global_);
+static bool resolveRaw(const std::string& raw, PkgRef& ref) {
+    // .cocolib bundle?
+    if (fs::is_regular_file(raw) && fs::path(raw).extension() == ".cocolib")
+        return unpackCocolib(raw, /*global_=*/false) == 0;
+    // local directory -> install by its manifest name
+    if (fs::is_directory(raw)) {
+        Manifest pm = readManifest(raw);
+        std::string n = pm.name;
+        if (n.empty()) {
+            std::string base = fs::path(raw).filename().string();
+            n = base.empty() ? fs::path(fs::absolute(raw)).filename().string()
+                             : base;
+        }
+        if (n.empty()) {
+            std::cerr << "coco install: cannot derive a package name from '"
+                      << raw << "'\n";
+            return false;
+        }
+        ref.kind = PkgRef::Kind::Path;
+        ref.spec = raw;
+        ref.destName = n;
+        return true;
+    }
+    // bare name -> look it up in the coco-libs registry
+    bool isBareName =
+        raw.find('/') == std::string::npos &&
+        raw.find('\\') == std::string::npos && raw.find(':') == std::string::npos &&
+        !raw.empty() && raw[0] != '.' && !fs::is_directory(raw);
+    if (isBareName) {
+        std::string url;
+        if (!lookupRegistry(raw, url)) {
+            std::cerr << "coco install: '" << raw
+                      << "' not found in the coco-libs registry\n"
+                      << "  browse: https://github.com/coco-lib/coco-libs\n";
+            return false;
+        }
+        ref.kind = PkgRef::Kind::Git;
+        ref.spec = url;
+        ref.destName = raw;
+        return true;
+    }
+    return parsePkgRef(raw, ref);
+}
+
+int cmdInstall(const std::string& raw, bool global_) {
+    PkgRef ref;
+    if (!resolveRaw(raw, ref)) return 1;
+    return installOne(ref, raw, global_, /*record=*/true);
+}
+
+// `coco add` — npm-install / go-mod-tidy style sync.
+//   coco add <pkg>...   resolve + install + record each dependency
+//   coco add            (no args) tidy: install every manifest dep that is
+//                       missing from coco_libs/libs
+int cmdAdd(const std::vector<std::string>& pkgs) {
+    if (pkgs.empty()) {
+        Manifest proj = readManifest(".");
+        if (proj.deps.empty()) {
+            std::cout << "nothing to sync ([dependencies] is empty)\n";
+            return 0;
+        }
+        int rc = 0, done = 0;
+        for (const auto& [name, spec] : proj.deps) {
+            if (fs::exists(pkgLibRoot(false) / name) ||
+                fs::exists(fs::path("coco_libs") / name))
+                continue;   // already present
+            PkgRef ref;
+            ref.destName = name;
+            if (spec.count("path")) {
+                ref.kind = PkgRef::Kind::Path;
+                ref.spec = spec.at("path");
+            } else if (spec.count("git")) {
+                ref.kind = PkgRef::Kind::Git;
+                ref.spec = spec.at("git");
+                if (spec.count("tag")) ref.tag = spec.at("tag");
+            } else if (spec.count("version")) {
+                std::string url;
+                if (!lookupRegistry(name, url)) {
+                    std::cerr << "coco add: '" << name
+                              << "' not found in the registry\n";
+                    rc = 1;
+                    continue;
+                }
+                ref.kind = PkgRef::Kind::Git;
+                ref.spec = url;
+            } else
+                continue;
+            if (installOne(ref, ref.spec, false, /*record=*/false) == 0) ++done;
+            else rc = 1;
+        }
+        std::cout << "synced " << done << " package"
+                  << (done == 1 ? "" : "s") << "\n";
+        return rc;
+    }
+    int rc = 0;
+    for (const auto& p : pkgs) {
+        PkgRef ref;
+        if (!resolveRaw(p, ref)) {
+            rc = 1;
+            continue;
+        }
+        if (installOne(ref, p, false, /*record=*/true) != 0) rc = 1;
+    }
+    return rc;
 }
 
 int cmdUpdate(const std::string& only) {
@@ -732,7 +1007,7 @@ int cmdUpdate(const std::string& only) {
 
         Manifest pkg;
         std::string sha;
-        if (!materializePackage(ref, fs::path("coco_libs") / name, pkg, sha)) {
+        if (!materializePackage(ref, pkgLibRoot(false) / name, pkg, sha)) {
             rc = 1;
             continue;
         }
@@ -764,7 +1039,9 @@ int cmdRemove(const std::string& name) {
                                }),
                 locks.end());
     std::error_code ec;
-    fs::remove_all(fs::path("coco_libs") / name, ec);
+    fs::remove_all(pkgLibRoot(false) / name, ec);
+    fs::remove_all(fs::path("coco_libs") / name, ec);   // legacy layout
+    fs::remove_all(fs::path("coco_libs") / "bin" / (name + ".cmd"), ec);
     writeManifest(".", proj);
     writeLock(".", locks);
     std::cout << "removed " << name;
@@ -781,22 +1058,163 @@ int cmdList() {
         for (fs::directory_iterator it(base, ec), end; !ec && it != end;
              it.increment(ec)) {
             if (ec || !it->is_directory(ec)) continue;
+            std::string fn = it->path().filename().string();
+            if (fn == "bin" || fn == "libs") continue;   // layout roots
             Manifest m = readManifest(it->path());
-            std::cout << label << it->path().filename().string() << " "
+            std::cout << label << fn << " "
                       << (m.version.empty() ? "?" : m.version);
             if (!m.description.empty())
                 std::cout << "  # " << m.description;
             std::cout << "\n";
         }
     };
-    show("", fs::path("coco_libs"));
-    if (!globalPkgDir().empty()) show("[global] ", fs::path(globalPkgDir()));
+    show("", pkgLibRoot(false));
+    show("", fs::path("coco_libs"));   // legacy layout
+    if (!globalPkgDir().empty()) {
+        show("[global] ", fs::path(globalPkgDir()) / "libs");
+        show("[global] ", fs::path(globalPkgDir()));
+        // globally installed apps (bin shims)
+        std::error_code ec;
+        fs::path bin = fs::path(globalPkgDir()) / "bin";
+        if (fs::is_directory(bin))
+            for (fs::directory_iterator it(bin, ec), end; !ec && it != end;
+                 it.increment(ec)) {
+                if (ec || !it->is_regular_file(ec)) continue;
+                if (it->path().extension() == ".cmd")
+                    std::cout << "[global:bin] "
+                              << it->path().stem().string() << "\n";
+            }
+    }
     return 0;
 }
 
 // ---------------------------------------------------------------------------
-// coco test — run *_test.co files
+// coco clone — clone any git repo (shorthand-aware)
+//   coco clone user/repo            -> github.com/user/repo
+//   coco clone github.com/u/r       full host forms work too
+//   coco clone https://host/u/r
+//   coco clone <spec> --full        keep full history (default: depth 1)
 // ---------------------------------------------------------------------------
+
+int cmdClone(const std::string& spec, bool full) {
+    if (std::system("git --version >nul 2>nul") != 0) {
+        std::cerr << "coco clone: git not found on PATH\n";
+        return 1;
+    }
+    std::string url = spec;
+    if (url.rfind("http://", 0) == 0 || url.rfind("https://", 0) == 0 ||
+        url.rfind("git@", 0) == 0 || url.find("://") != std::string::npos) {
+        // already a URL
+    } else {
+        // bare user/repo -> assume github; host/u/r keeps its host
+        size_t slash = url.find('/');
+        std::string head =
+            slash == std::string::npos ? url : url.substr(0, slash);
+        bool hasHost = head.find('.') != std::string::npos ||
+                       head.find(':') != std::string::npos;
+        if (!hasHost) url = "github.com/" + url;
+        url = "https://" + url + ".git";
+    }
+    // destination dir = repo name
+    std::string name = spec;
+    while (!name.empty() && name.back() == '/') name.pop_back();
+    size_t s2 = name.find_last_of('/');
+    name = s2 == std::string::npos ? name : name.substr(s2 + 1);
+    if (name.size() > 4 && name.compare(name.size() - 4, 4, ".git") == 0)
+        name.erase(name.size() - 4);
+    if (fs::exists(name)) {
+        std::cerr << "coco clone: '" << name << "' already exists here\n";
+        return 1;
+    }
+    std::string cmd =
+        "git clone --quiet" + std::string(full ? "" : " --depth 1") + " " +
+        url + " \"" + name + "\"";
+    std::cout << "cloning " << url << " ...\n";
+    int rc = std::system(cmd.c_str());
+    if (rc != 0) {
+        std::cerr << "coco clone: failed (" << rc << ")\n";
+        return rc == 0 ? 1 : rc;
+    }
+    Manifest m = readManifest(name);
+    std::cout << "cloned into ./" << name;
+    if (!m.name.empty())
+        std::cout << " - " << m.name << " v"
+                  << (m.version.empty() ? "?" : m.version)
+                  << (m.type == "lib" ? " [lib]" : " [app]");
+    std::cout << "\nnext:\n  cd " << name << " && coco run | coco test .\n";
+    return 0;
+}
+
+// ---------------------------------------------------------------------------
+// coco list online — browse the coco-libs registry
+// ---------------------------------------------------------------------------
+
+int cmdListOnline() {
+    const std::string cache = ".coco-registry-lib.toml";
+    std::system(
+        "curl -s --max-time 15 -o .coco-registry-lib.toml "
+        "https://raw.githubusercontent.com/coco-lib/coco-libs/refs/heads/"
+        "main/registry/lib.toml");
+    std::string text;
+    if (!readFile(cache, text)) {
+        std::cerr << "coco list online: cannot reach "
+                     "raw.githubusercontent.com/coco-lib/coco-libs\n";
+        return 1;
+    }
+    Doc d = coco::tomlmini::parse(text);
+    struct Row { std::string name, desc, url, ver; };
+    std::vector<Row> rows;
+    // [[lib]] arrays-of-tables arrive in order in Doc::tables
+    for (const auto& t : d.tables) {
+        if (t.name != "lib") continue;
+        auto gv = [&](const char* k) {
+            auto it = t.kv.find(k);
+            return it == t.kv.end() ? "" : coco::tomlmini::unquote(it->second);
+        };
+        // versions = ["0.1.0", ...] -> advertise the latest
+        std::string ver = gv("version");
+        if (ver.empty()) {
+            std::string arr = gv("versions");
+            size_t a = arr.find('['), b = arr.rfind(']');
+            if (a != std::string::npos && b != std::string::npos) {
+                std::string body = arr.substr(a + 1, b - a - 1);
+                size_t last = body.rfind('"');
+                size_t prev = last == std::string::npos
+                                  ? std::string::npos
+                                  : body.rfind('"', last - 1 < body.size()
+                                                          ? last - 1
+                                                          : 0);
+                if (last != std::string::npos &&
+                    prev != std::string::npos && prev < last)
+                    ver = body.substr(prev + 1, last - prev - 1);
+            }
+        }
+        rows.push_back({gv("name"), gv("description"), gv("url"), ver});
+    }
+    if (rows.empty()) {
+        std::cout << "registry is empty (be the first to publish!)\n";
+        return 0;
+    }
+    size_t wName = 4, wVer = 7;
+    for (const auto& r : rows) {
+        if (r.name.size() > wName) wName = r.name.size();
+        if (r.ver.size() > wVer) wVer = r.ver.size();
+    }
+    std::cout << "NAME" << std::string(wName - 4 + 2, ' ') << "VERSION"
+              << std::string(wVer - 7 + 2, ' ') << "URL\n";
+    for (const auto& r : rows) {
+        std::cout << r.name << std::string(wName - r.name.size() + 2, ' ')
+                  << (r.ver.empty() ? "?" : r.ver)
+                  << std::string(wVer - r.ver.size() + 2, ' ') << r.url
+                  << "\n";
+        if (!r.desc.empty())
+            std::cout << std::string(wName + wVer + 6, ' ') << "# " << r.desc
+                      << "\n";
+    }
+    std::cout << rows.size() << " package(s)\ninstall with: coco install "
+              << "<name>\n";
+    return 0;
+}
 
 bool isTestFile(const fs::path& p) {
     std::string n = p.filename().string();
@@ -1163,14 +1581,21 @@ int cmdDoc(const std::string& target, int port) {
     // resolve target: dir | installed name
     fs::path libDir(target);
     if (!fs::is_directory(libDir)) {
-        fs::path local = fs::path("coco_libs") / target;
-        fs::path glob;
-        if (!globalPkgDir().empty())
-            glob = fs::path(globalPkgDir()) / target;
+        fs::path local = pkgLibRoot(false) / target;
+        fs::path legacy = fs::path("coco_libs") / target;
+        fs::path glob, globLegacy;
+        if (!globalPkgDir().empty()) {
+            glob = fs::path(globalPkgDir()) / "libs" / target;
+            globLegacy = fs::path(globalPkgDir()) / target;
+        }
         if (fs::is_directory(local))
             libDir = local;
+        else if (fs::is_directory(legacy))
+            libDir = legacy;
         else if (!glob.empty() && fs::is_directory(glob))
             libDir = glob;
+        else if (!globLegacy.empty() && fs::is_directory(globLegacy))
+            libDir = globLegacy;
         else {
             std::cerr << "coco doc: no project or installed library '"
                       << target << "'\n";
@@ -1210,8 +1635,11 @@ int cmdDoc(const std::string& target, int port) {
 bool resolveSource(const std::string& dotted,
                    const std::vector<std::string>& dirs, std::string& path,
                    std::string& src) {
+    std::string name = dotted;
+    if (name.size() > 3 && name.compare(name.size() - 3, 3, ".co") == 0)
+        name.erase(name.size() - 3);   // explicit suffix form
     std::string rel;
-    for (char c : dotted) rel += (c == '.' || c == '/') ? '/' : c;
+    for (char c : name) rel += (c == '.' || c == '/') ? '/' : c;
     rel += ".co";
     for (const auto& d : dirs) {
         std::string cand = d + "/" + rel;
@@ -1282,32 +1710,62 @@ std::string detectRuntimeFlags(const std::string& binRoot) {
     return "/MD /O2";
 }
 
-int buildApp(const Manifest& m) {
-    std::string entry = m.main.empty() ? "code/main.co" : m.main;
-    std::string mainSrc;
-    if (!readFile(entry, mainSrc)) {
-        std::cerr << "coco build: entry '" << entry << "' not found\n";
-        return 1;
-    }
+// ---- build options ---------------------------------------------------------
+// Output layout is cargo-flavored but Coco-named:
+//   build/<profile>/<target>/...      profile: debug | release
+// Targets: <os>-<arch>, os in {windows,linux,darwin}, arch in {amd64,arm64}
 
-    // static check first
-    {
-        coco::DiagEngine diags;
-        frontEnd(entry, mainSrc, diags);
-        if (diags.count()) {
-            printDiags(entry, diags);
-            return 65;
-        }
-    }
+struct BuildOpts {
+    bool release = false;
+    bool wantLib = false;
+    bool sasm = false;       // -S  human-readable assembly listing (.sasm)
+    bool obj = false;        // -O  native object file (.obj + .lib via lib.exe)
+    bool bytecode = false;   // -B  portable bytecode bundle (.cob)
+    std::string target;      // --target=<os>-<arch>; empty -> host
+};
 
-    // gather transitive import sources to embed
+std::string hostTarget() {
+#if defined(_WIN32)
+    std::string os = "windows";
+#elif defined(__APPLE__)
+    std::string os = "darwin";
+#elif defined(__linux__)
+    std::string os = "linux";
+#else
+    std::string os = "unknown";
+#endif
+#if defined(_M_ARM64) || defined(__aarch64__)
+    std::string arch = "arm64";
+#else
+    std::string arch = "amd64";
+#endif
+    return os + "-" + arch;
+}
+
+bool validTarget(const std::string& t) {
+    static const char* kKnown[] = {
+        "windows-amd64", "windows-arm64", "linux-amd64", "linux-arm64",
+        "darwin-amd64",  "darwin-arm64",
+    };
+    for (const char* k : kKnown)
+        if (t == k) return true;
+    return false;
+}
+
+// resolve module sources transitively from the entry file
+bool gatherEmbedded(const std::string& entry, const std::string& mainSrc,
+                    std::map<std::string, std::string>& embedded) {
     std::vector<std::string> dirs;
+    dirs.push_back("code");                 // sibling modules of the entry
+    dirs.push_back("coco_libs/libs");
     dirs.push_back("coco_libs");
-    if (!globalPkgDir().empty()) dirs.push_back(globalPkgDir());
+    if (!globalPkgDir().empty()) {
+        dirs.push_back(globalPkgDir() + "/libs");
+        dirs.push_back(globalPkgDir());
+    }
     dirs.push_back("../stdlib");
     dirs.push_back("../../stdlib");
 
-    std::map<std::string, std::string> embedded;
     std::set<std::string> seen;
     std::vector<std::pair<std::string, std::string>> queue;
     {
@@ -1315,10 +1773,14 @@ int buildApp(const Manifest& m) {
         collectImports(entry, mainSrc, names);
         for (const auto& n : names) queue.push_back({n, ""});
     }
-    seen.insert("main");
     while (!queue.empty()) {
-        auto [name, _] = queue.back();
+        auto [nameRaw, _] = queue.back();
         queue.pop_back();
+        // normalize exactly like Interpreter::loadModuleFile: drop an
+        // explicit ".co" suffix FIRST, then '.'/'/' -> '/'
+        std::string name = nameRaw;
+        if (name.size() > 3 && name.compare(name.size() - 3, 3, ".co") == 0)
+            name.erase(name.size() - 3);
         std::string key;
         for (char c : name) key += (c == '.' || c == '/') ? '/' : c;
         if (seen.count(key)) continue;
@@ -1329,6 +1791,418 @@ int buildApp(const Manifest& m) {
         std::vector<std::string> names;
         collectImports(p, s, names);
         for (const auto& n : names) queue.push_back({n, ""});
+    }
+    return true;
+}
+
+// ---- -S: human-readable pseudo-assembly listing -----------------------------
+// COCO-SASM v1: a linear, labeled listing derived from the AST. Great for
+// reading what your program does; not (yet) an executable ISA.
+
+struct SasmEmitter {
+    std::ostringstream out;
+    int nextLabel = 0;
+    std::vector<std::pair<std::string, std::string>> loopLabels;   // brk, cont
+
+    // compact printable form of a Type node
+    static std::string tyName(const coco::ast::Type* t) {
+        if (!t) return "<type>";
+        switch (t->kind) {
+            case coco::ast::TyKind::Name:
+                return t->name +
+                       (t->generics.empty()
+                            ? ""
+                            : "[" + std::to_string(t->generics.size()) + "]");
+            case coco::ast::TyKind::Pointer:
+                return "*" + tyName(t->inner.get());
+            case coco::ast::TyKind::Ref:
+                return (t->refMut ? "&mut " : "&") + tyName(t->inner.get());
+            case coco::ast::TyKind::Optional:
+                return tyName(t->inner.get()) + "?";
+            case coco::ast::TyKind::Fn:
+                return "fn[" + std::to_string(t->params.size()) + " args]";
+            case coco::ast::TyKind::Tuple:
+                return "(" + std::to_string(t->params.size()) + ")";
+        }
+        return "<type>";
+    }
+
+    std::string nl(const std::string& s) { return "    " + s + "\n"; }
+    std::string quote(const std::string& s) {
+        return coco::tomlmini::quote(s);
+    }
+    void expr(const coco::ast::Expr& e) {
+        using ET = coco::ast::ExKind;
+        switch (e.kind) {
+            case ET::Int: out << nl("PUSH_INT " + e.text); break;
+            case ET::Float: out << nl("PUSH_FLOAT " + e.text); break;
+            case ET::Str: out << nl("PUSH_STR " + quote(e.text)); break;
+            case ET::CharLit: out << nl("PUSH_CHAR " + quote(e.text)); break;
+            case ET::Ident: out << nl("LOAD " + e.text); break;
+            case ET::Unary:
+                expr(*e.rhs);
+                out << nl("UNOP " + e.op);
+                break;
+            case ET::Binary:
+                expr(*e.lhs);
+                expr(*e.rhs);
+                out << nl("BINOP " + e.op);
+                break;
+            case ET::Call: {
+                for (const auto& a : e.args) expr(*a.value);
+                if (e.lhs && e.lhs->kind == ET::Ident)
+                    out << nl("CALL " + e.lhs->text + " " +
+                              std::to_string(e.args.size()));
+                else {
+                    expr(*e.lhs);
+                    out << nl("CALL_INDIRECT " +
+                              std::to_string(e.args.size()));
+                }
+                break;
+            }
+            case ET::Index:
+                expr(*e.lhs);
+                expr(*e.rhs);
+                out << nl("INDEX_GET");
+                break;
+            case ET::Slice:
+                expr(*e.lhs);
+                if (e.cond) expr(*e.cond);   // step slot
+                out << nl("SLICE_GET");
+                break;
+            case ET::Member:
+                expr(*e.lhs);
+                out << nl("MEMBER ." + e.text +
+                          (e.nilSafe ? " (nil-safe)" : ""));
+                break;
+            case ET::Try:
+                expr(*e.lhs);
+                out << nl("TRY_PROPAGATE");
+                break;
+            case ET::Cond: {   // c ? a : b
+                int lElse = nextLabel++, lEnd = nextLabel++;
+                expr(*e.cond);
+                out << nl("JMP_FALSE L" + std::to_string(lElse));
+                expr(*e.lhs);
+                out << nl("JMP L" + std::to_string(lEnd));
+                out << "L" + std::to_string(lElse) + ":\n";
+                expr(*e.rhs);
+                out << "L" + std::to_string(lEnd) + ":\n";
+                break;
+            }
+            case ET::Lambda: {
+                out << nl("CLOSURE (" + std::to_string(
+                                          e.lambdaParams.size()) +
+                          " params)");
+                break;
+            }
+            case ET::List:
+            case ET::Set:
+            case ET::Tuple:
+                for (const auto& el : e.elems) expr(*el);
+                out << nl(e.kind == ET::List ? "PACK_LIST "
+                           : e.kind == ET::Set ? "PACK_SET "
+                                               : "PACK_TUPLE ") <<
+                    "[" << std::to_string(e.elems.size()) << "]";
+                out << "\n";
+                break;
+            case ET::Dict:
+                for (const auto& [k, v] : e.pairs) {
+                    expr(*k);
+                    expr(*v);
+                }
+                out << nl("PACK_DICT [" + std::to_string(e.pairs.size()) +
+                          "]");
+                break;
+            case ET::FString:
+                for (const auto& p : e.parts) {
+                    if (p.isExpr && p.expr)
+                        expr(*p.expr);
+                    else
+                        out << nl("PUSH_STR " + quote(p.text));
+                }
+                out << nl("FSTRING_BUILD [" +
+                          std::to_string(e.parts.size()) + "]");
+                break;
+            case ET::ListComp:
+            case ET::Generator:
+                out << nl("; comprehension elided");
+                break;
+            case ET::New:
+                for (const auto& a : e.args) expr(*a.value);
+                out << nl("NEW " + tyName(e.newType.get()));
+                break;
+            case ET::Cast:
+                expr(*e.lhs);
+                out << nl("CAST " + tyName(e.newType.get()));
+                break;
+        }
+    }
+
+    void stmts(const std::vector<coco::ast::StmtP>& body, int depth);
+
+    void stmt(const coco::ast::Stmt& s, int depth) {
+        using ST = coco::ast::StKind;
+        std::string ind(depth * 2, ' ');
+        switch (s.kind) {
+            case ST::FuncDef: {
+                out << ind << ".func " << s.name << " argc="
+                    << std::to_string(s.params.size()) << "\n";
+                stmts(s.body, depth + 1);
+                out << ind << ".endfunc\n";
+                break;
+            }
+            case ST::StructDef:
+                out << ind << "; struct " << s.name << "\n";
+                break;
+            case ST::EnumDef:
+                out << ind << "; enum " << s.name << "\n";
+                break;
+            case ST::TraitDef:
+                out << ind << "; trait " << s.name << "\n";
+                break;
+            case ST::ImplDef:
+                out << ind << "; impl " << s.name << "\n";
+                stmts(s.body, depth + 1);
+                break;
+            case ST::ConstDecl:
+            case ST::VarDecl:
+                if (s.value) expr(*s.value);
+                out << nl(std::string(s.kind == ST::VarDecl ? "STORE_MUT "
+                                                            : "STORE") +
+                          (s.target && s.target->kind == coco::ast::ExKind::Ident
+                               ? s.target->text
+                               : "<pat>"));
+                break;
+            case ST::ExprStmt:
+                for (const auto& x : s.exprs) {
+                    expr(*x);
+                    out << nl("POP_DISCARD");
+                }
+                break;
+            case ST::Assign: {
+                size_t nT = s.exprs.size() / 2;
+                for (size_t i = 0; i < nT; ++i) {
+                    const auto& val = s.exprs[nT + i];
+                    const auto& tgt = s.exprs[i];
+                    if (val) expr(*val);
+                    if (tgt && tgt->kind == coco::ast::ExKind::Ident)
+                        out << nl("STORE " + tgt->text);
+                    else if (tgt && tgt->kind == coco::ast::ExKind::Index) {
+                        expr(*tgt->lhs);
+                        expr(*tgt->rhs);
+                        out << nl("INDEX_SET");
+                    } else if (tgt)
+                        out << nl("STORE <complex>");
+                }
+                break;
+            }
+            case ST::AugAssign: {
+                if (!s.exprs.empty()) {
+                    const auto& tgt = s.exprs[0];
+                    if (tgt && tgt->kind == coco::ast::ExKind::Ident) {
+                        out << nl("LOAD " + tgt->text);
+                        if (s.exprs.size() > 1) expr(*s.exprs.back());
+                        out << nl("BINOP " + s.augOp);
+                        out << nl("STORE " + tgt->text);
+                    }
+                }
+                break;
+            }
+            case ST::Return:
+                if (!s.exprs.empty()) expr(*s.exprs[0]);
+                out << nl("RET");
+                break;
+            case ST::Raise:
+                if (!s.exprs.empty()) expr(*s.exprs[0]);
+                out << nl("RAISE");
+                break;
+            case ST::Break:
+                if (!loopLabels.empty())
+                    out << nl("JMP " + loopLabels.back().first);
+                break;
+            case ST::Continue:
+                if (!loopLabels.empty())
+                    out << nl("JMP " + loopLabels.back().second);
+                break;
+            case ST::Defer:
+                out << ind << "; defer\n";
+                if (!s.exprs.empty()) expr(*s.exprs[0]);
+                break;
+            case ST::If: {
+                int lElse = nextLabel++, lEnd = nextLabel++;
+                if (!s.exprs.empty()) expr(*s.exprs[0]);   // condition
+                out << nl("JMP_FALSE L" + std::to_string(lElse));
+                stmts(s.body, depth);
+                out << nl("JMP L" + std::to_string(lEnd));
+                out << ind << "L" + std::to_string(lElse) + ":\n";
+                // elif chains are nested If statements in elseBody
+                if (!s.elseBody.empty()) stmts(s.elseBody, depth);
+                out << ind << "L" + std::to_string(lEnd) + ":\n";
+                break;
+            }
+            case ST::While: {
+                int lTop = nextLabel++, lEnd = nextLabel++;
+                const std::string brk = "L" + std::to_string(lEnd),
+                                  cont = "L" + std::to_string(lTop);
+                out << ind << "L" + std::to_string(lTop) + ":\n";
+                if (!s.exprs.empty()) expr(*s.exprs[0]);   // condition
+                out << nl("JMP_FALSE " + brk);
+                loopLabels.push_back({brk, cont});
+                stmts(s.body, depth);
+                loopLabels.pop_back();
+                out << nl("JMP " + cont);
+                out << ind << brk + ":\n";
+                break;
+            }
+            case ST::For: {
+                int lTop = nextLabel++, lEnd = nextLabel++;
+                const std::string brk = "L" + std::to_string(lEnd),
+                                  cont = "L" + std::to_string(lTop);
+                if (!s.exprs.empty()) expr(*s.exprs[0]);   // iterable
+                out << nl("ITER_NEW");
+                out << ind << "L" + std::to_string(lTop) + ":\n";
+                out << nl("ITER_NEXT");
+                out << nl("JMP_FALSE " + brk);
+                out << nl("BIND_ITER_ITEM");
+                loopLabels.push_back({brk, cont});
+                stmts(s.body, depth);
+                loopLabels.pop_back();
+                out << nl("JMP " + cont);
+                out << ind << brk + ":\n";
+                break;
+            }
+            case ST::Match: {
+                out << ind << "; match arms: " +
+                           std::to_string(s.arms.size()) + "\n";
+                for (const auto& arm : s.arms) {
+                    out << ind << ".arm\n";
+                    if (arm.guard) expr(*arm.guard);
+                    stmts(arm.body, depth + 1);
+                }
+                break;
+            }
+            case ST::Select:
+                out << ind << "; select (" + std::to_string(s.selArms.size()) +
+                           " arms)\n";
+                break;
+            case ST::Unsafe:
+                stmts(s.body, depth);
+                break;
+            case ST::Spawn:
+                if (!s.exprs.empty()) expr(*s.exprs[0]);
+                out << nl("SPAWN");
+                break;
+            case ST::Import:
+                out << ind << "; import " << s.moduleName << "\n";
+                break;
+            case ST::Export:
+                out << ind << "; export\n";
+                break;
+            case ST::Pass:
+                out << nl("NOP");
+                break;
+        }
+    }
+};
+
+void SasmEmitter::stmts(const std::vector<coco::ast::StmtP>& body, int depth) {
+    for (const auto& st : body)
+        if (st) stmt(*st, depth);
+}
+
+std::string emitSasm(const std::string& srcPath,
+                     const std::vector<coco::ast::StmtP>& body) {
+    SasmEmitter em;
+    em.out << "; COCO-SASM v1 - pseudo-assembly listing (generated by `coco"
+              " build -S`)\n"
+           << "; source: " << srcPath << "\n"
+           << "; this is a readable IR dump, not machine code\n\n";
+    em.stmts(body, 0);
+    return em.out.str();
+}
+
+// ---- -B: portable bytecode bundle (.cob) ------------------------------------
+// Layout: magic "COCOB" + u8 version(1) + u32 count, then per entry:
+//   u32 nameLen | name bytes | u32 srcLen | utf8 source bytes
+
+void putU32(std::string& s, uint32_t v) {
+    s += char(v & 0xFF);
+    s += char((v >> 8) & 0xFF);
+    s += char((v >> 16) & 0xFF);
+    s += char((v >> 24) & 0xFF);
+}
+
+std::string emitCob(const std::string& mainSrc,
+                    const std::map<std::string, std::string>& embedded) {
+    std::string o = "COCOB";
+    o += '\x01';
+    putU32(o, (uint32_t)(embedded.size() + 1));
+    auto addEntry = [&](const std::string& name, const std::string& src) {
+        putU32(o, (uint32_t)name.size());
+        o += name;
+        putU32(o, (uint32_t)src.size());
+        o += src;
+    };
+    addEntry("main", mainSrc);
+    for (const auto& [k, v] : embedded) addEntry(k, v);
+    return o;
+}
+
+int buildApp(const Manifest& m, const BuildOpts& opts) {
+    const std::string profile = opts.release ? "release" : "debug";
+    const fs::path outDir = fs::path("build") / profile / opts.target;
+    std::error_code ec;
+    fs::create_directories(outDir, ec);
+
+    std::string entry = m.main.empty() ? "code/main.co" : m.main;
+    std::string mainSrc;
+    if (!readFile(entry, mainSrc)) {
+        std::cerr << "coco build: entry '" << entry << "' not found\n";
+        return 1;
+    }
+
+    // parse once (shared by checks and -S)
+    std::vector<coco::ast::StmtP> parsed;
+    {
+        coco::DiagEngine diags;
+        frontEnd(entry, mainSrc, diags);
+        if (diags.count()) {
+            printDiags(entry, diags);
+            return 65;
+        }
+        auto toks = coco::Lexer(mainSrc, entry, diags).lexAll();
+        if (!diags.count())
+            parsed = coco::Parser(toks, diags).parseProgram();
+        if (diags.count()) {
+            printDiags(entry, diags);
+            return 65;
+        }
+    }
+
+    if (opts.sasm) {
+        const std::string out =
+            (outDir / (m.name + ".sasm")).generic_string();
+        writeFile(out, emitSasm(entry, parsed));
+        std::cout << "wrote assembly listing " << out << "\n";
+        return 0;
+    }
+
+    std::map<std::string, std::string> embedded;
+    gatherEmbedded(entry, mainSrc, embedded);
+
+    if (opts.bytecode || opts.target != hostTarget()) {
+        const std::string out =
+            (outDir / (m.name + ".cob")).generic_string();
+        writeFile(out, emitCob(mainSrc, embedded));
+        if (opts.bytecode && opts.target == hostTarget())
+            std::cout << "wrote bytecode bundle " << out << " ("
+                      << (embedded.size() + 1) << " modules)\n";
+        else
+            std::cout << "cross-target " << opts.target
+                      << ": wrote portable bundle " << out
+                      << " (native codegen needs that host's toolchain)\n";
+        if (!opts.obj) return 0;
     }
 
     // emit launcher .cpp embedding every reachable source
@@ -1341,13 +2215,19 @@ int buildApp(const Manifest& m) {
       << "#include <cstdio>\n#include <fstream>\n#include <iostream>\n"
       << "#include <sstream>\n\n";
     o << "static const char* kMainSrc = " << cppRawLiteral(mainSrc) << ";\n";
+    auto cIdent = [](const std::string& k) {
+        std::string r = "M";
+        for (char c : k)
+            r += isalnum((unsigned char)c) ? c : '_';
+        return r;
+    };
     for (const auto& [key, src] : embedded)
-        o << "static const char* kMod_" << key << " = "
+        o << "static const char* kMod_" << cIdent(key) << " = "
           << cppRawLiteral(src) << ";\n";
     o << "\nstruct Embed { const char* key; const char* src; };\n"
       << "static const Embed kEmbed[] = {\n";
     for (const auto& [key, src] : embedded)
-        o << "    {\"" << key << "\", kMod_" << key << "},\n";
+        o << "    {\"" << key << "\", kMod_" << cIdent(key) << "},\n";
     o << "};\n\n"
       << "int main() {\n"
       << "    coco::DiagEngine diags;\n"
@@ -1377,7 +2257,7 @@ int buildApp(const Manifest& m) {
       << "    }\n"
       << "}\n";
 
-    writeFile("build/" + m.name + ".cpp", o.str());
+    writeFile((outDir / (m.name + ".cpp")).generic_string(), o.str());
 
     // compile with the same toolchain cmake uses
     const char* cl = std::getenv("COCO_CL");
@@ -1392,27 +2272,65 @@ int buildApp(const Manifest& m) {
 
     // NOTE: must not start with '"' — cmd /c strips leading quotes.
     // NOTE: no quoted paths ending in '\' (argv would eat the quote).
+    const std::string genCpp = (outDir / (m.name + ".cpp")).generic_string();
+    const std::string outBase = (outDir / m.name).generic_string();
+    if (opts.obj) {
+        // -O: object file (+ static .lib via lib.exe); host toolchain only
+        if (opts.target != hostTarget()) {
+            std::cerr << "coco build -O: native objects for '" << opts.target
+                      << "' need that platform's toolchain\n";
+            return 1;
+        }
+        std::string cmd =
+            "cd . && \"" + clPath + "\" /nologo /EHsc /c " +
+            detectRuntimeFlags(binRoot) + " /std:c++20" + " /I\"" + binRoot +
+            "\\..\\src\"" + " /Fo\"" + outBase + ".obj\" " + genCpp;
+        if (std::getenv("COCO_VERBOSE")) std::cerr << "[cmd] " << cmd << "\n";
+        std::cout << "compiling " << outBase << ".obj ...\n";
+        int rc = std::system(cmd.c_str());
+        if (rc != 0) {
+            std::cerr << "coco build: compilation failed (" << rc << ")\n";
+            return rc == 0 ? 1 : rc;
+        }
+        const char* libTool = std::getenv("COCO_LIB_TOOL");
+        std::string libPath =
+            libTool ? libTool
+                    : clPath.substr(0, clPath.find_last_of("/\\")) +
+                          "/lib.exe";
+        std::string arc =
+            "cd . && \"" + libPath + "\" /nologo /OUT:" + outBase + ".lib \"" +
+            outBase + ".obj\"";
+        std::cout << "archiving " << outBase << ".lib ...\n";
+        int rc2 = std::system(arc.c_str());
+        if (rc2 != 0) {
+            std::cerr << "coco build: lib.exe failed (" << rc2 << ")\n";
+            return rc2 == 0 ? 1 : rc2;
+        }
+        std::cout << "built " << outBase << ".obj + .lib\n";
+        return 0;
+    }
+
     std::string flags = detectRuntimeFlags(binRoot);
-    std::string cmd = "cd . && \"" + clPath + "\" /nologo /EHsc " + flags +
-                      " /std:c++20" +
-                      " /I\"" + binRoot + "\\..\\src\""
-                      " /Fobuild\\ build/" + m.name + ".cpp" +
-                      " /Fe:build/" + m.name +
-                      ".exe /link /LIBPATH:\"" + binRoot +
-                      "\" coco_interp.lib coco_sema.lib coco_parser.lib"
-                      " coco_ast.lib coco_lex.lib";
+    std::string cmd =
+        "cd . && \"" + clPath + "\" /nologo /EHsc " + flags + " /std:c++20" +
+        " /I\"" + binRoot + "\\..\\src\""
+        " /Fobuild\\ " + genCpp +
+        " /Fe:" + outBase + ".exe /link /LIBPATH:\"" + binRoot +
+        "\" coco_interp.lib coco_sema.lib coco_parser.lib"
+        " coco_ast.lib coco_lex.lib";
     if (std::getenv("COCO_VERBOSE")) std::cerr << "[cmd] " << cmd << "\n";
-    std::cout << "compiling build/" << m.name << ".exe ...\n";
+    std::cout << "compiling " << profile << "/" << opts.target << "/"
+              << m.name << ".exe ...\n";
     int rc = std::system(cmd.c_str());
     if (rc != 0) {
         std::cerr << "coco build: compilation failed (" << rc << ")\n";
         return rc == 0 ? 1 : rc;
     }
-    std::cout << "built build/" << m.name << ".exe\n";
+    std::cout << "built " << outBase << ".exe\n";
     return 0;
 }
 
-int packLib(const Manifest& m) {
+int packLib(const Manifest& m, const BuildOpts& opts) {
     // type-check every source under code/
     int bad = 0;
     std::error_code ec;
@@ -1437,8 +2355,11 @@ int packLib(const Manifest& m) {
     regenerateDocs(m);
 
     // pack manifest + code/ + docs/ into a single distributable
+    const fs::path outDir =
+        fs::path("build") / (opts.release ? "release" : "debug") / opts.target;
+    fs::create_directories(outDir, ec);
     const std::string outPath =
-        "build/" + m.name + "-" + m.version + ".cocolib";
+        (outDir / (m.name + "-" + m.version + ".cocolib")).generic_string();
     std::ostringstream o;
     o << "COCOLIB/1\n";
     std::vector<fs::path> files;
@@ -1463,21 +2384,45 @@ int packLib(const Manifest& m) {
 }
 
 int cmdBuild(const std::vector<std::string>& args, size_t from) {
-    bool wantLib = from < args.size() && args[from] == "lib";
-    if (wantLib && from + 1 < args.size()) return 64;
+    BuildOpts opts;
+    for (size_t i = from; i < args.size(); ++i) {
+        const std::string& a = args[i];
+        if (a == "lib") opts.wantLib = true;
+        else if (a == "--release" || a == "-r") opts.release = true;
+        else if (a == "--debug") opts.release = false;
+        else if (a == "-S" || a == "-s" || a == "--asm") opts.sasm = true;
+        else if (a == "-O" || a == "--obj") opts.obj = true;
+        else if (a == "-B" || a == "-b" || a == "--bytecode")
+            opts.bytecode = true;
+        else if (a.rfind("--target=", 0) == 0)
+            opts.target = a.substr(9);
+        else if (a == "--target" && i + 1 < args.size())
+            opts.target = args[++i];
+        else {
+            std::cerr << "coco build: unknown option '" << a << "'\n";
+            return 64;
+        }
+    }
+    if (opts.target.empty()) opts.target = hostTarget();
+    if (!validTarget(opts.target)) {
+        std::cerr << "coco build: unknown target '" << opts.target
+                  << "'\n  known: windows-amd64, windows-arm64, linux-amd64,"
+                     " linux-arm64, darwin-amd64, darwin-arm64\n";
+        return 64;
+    }
     Manifest m = readManifest(".");
     if (m.name.empty()) {
         std::cerr << "coco build: no coco.toml in this directory\n";
         return 1;
     }
-    if (wantLib || m.type == "lib") {
+    if (opts.wantLib || m.type == "lib") {
         if (!fs::is_directory("code")) {
             std::cerr << "coco build lib: no code/ directory\n";
             return 1;
         }
-        return packLib(m);
+        return packLib(m, opts);
     }
-    return buildApp(m);
+    return buildApp(m, opts);
 }
 
 int unpackCocolib(const std::string& raw, bool global_) {
@@ -1524,9 +2469,9 @@ int unpackCocolib(const std::string& raw, bool global_) {
         return 1;
     }
 
-    fs::path base = global_ ? fs::path(globalPkgDir()) : fs::path("coco_libs");
+    fs::path base = pkgLibRoot(global_);
     for (const auto& s : sections)
-        writeFile(fs::path(base) / name / fs::path(s.path).generic_string(),
+        writeFile(base / name / fs::path(s.path).generic_string(),
                   s.body);
     std::cout << "installed " << raw << " -> "
               << (base / name / "").string() << " (" << sections.size()
@@ -1544,18 +2489,29 @@ void usage() {
         << "  coco new <name>                  scaffold an application\n"
         << "  coco new lib <name>              scaffold a library package\n"
         << "  coco test [.|file|dir ...]       run *_test.co files\n"
-        << "  coco install|i [-g] <pkg>        install into ./coco_libs\n"
+        << "  coco install|i [-g] <pkg>        install into ./coco_libs/libs\n"
         << "      pkg := [github.com/]user/repo[@tag] | <path> | <registry"
                "-name> | file.cocolib\n"
-        << "      -g installs globally into ~/.coco/coco-pkg\n"
+        << "      -g installs globally into ~/.coco/coco-pkg/libs\n"
+        << "         (apps also get a bin shim + PATH entry)\n"
+        << "  coco add <pkg>...                install + record dependencies"
+               "\n"
+        << "  coco add                         sync: install missing deps"
+               " (go mod tidy)\n"
         << "  coco update [name]               refresh installed deps\n"
         << "  coco remove <name>               uninstall a dependency\n"
-        << "  coco build                       compile project -> "
-               "build/<name>.exe\n"
+        << "  coco clone <repo> [--full]       clone any repo (shorthand:"
+               " user/repo)\n"
+        << "  coco build [--release|--debug]   compile project\n"
+        << "           [--target=<os>-<arch>]    targets: windows|linux|"
+               "darwin - amd64|arm64\n"
+        << "           [-S|-O|-B]                -S asm listing, -O .obj+."
+               "lib, -B bytecode\n"
         << "  coco build lib                   check + pack -> "
-               "build/<n>-<v>.cocolib\n"
+               "build/<profile>/<t>/<n>-<v>.cocolib\n"
         << "  coco doc <lib|dir> [--port N]    serve markdown docs + API ref\n"
-        << "  coco list                        list installed libraries\n";
+        << "  coco list                        list installed libraries\n"
+        << "  coco list online                 browse the coco-libs registry\n";
 }
 
 } // namespace
@@ -1582,7 +2538,15 @@ int main(int argc, char** argv) {
         std::string scriptDir = fs::is_directory(target)
                                     ? target
                                     : file.parent_path().string();
-        return runProgram(file.string(), libDirsFor(scriptDir));
+        auto dirs = libDirsFor(scriptDir);
+        // sibling modules of the entry file (code/) are importable too:
+        // `import "util.co"` or `import util` inside code/main.co
+        {
+            std::string parent = file.parent_path().string();
+            if (!parent.empty() && parent != "." && parent != scriptDir)
+                dirs.insert(dirs.begin(), parent);
+        }
+        return runProgram(file.string(), dirs);
     }
     if (cmd == "new" && args.size() >= 2) {
         bool lib = args[1] == "lib";
@@ -1612,9 +2576,20 @@ int main(int argc, char** argv) {
     }
     if (cmd == "update" && args.size() <= 2)
         return cmdUpdate(args.size() == 2 ? args[1] : "");
-    if (cmd == "remove" && args.size() == 2) return cmdRemove(args[1]);
-    if (cmd == "list" && args.size() == 1) return cmdList();
-    if (cmd == "build" && args.size() <= 2) return cmdBuild(args, 1);
+    if (cmd == "remove" && args.size() >= 2)
+        return cmdRemove(args[1]);
+    if (cmd == "add") {   // npm-install style sync; no args = tidy
+        std::vector<std::string> pkgs(args.begin() + 1, args.end());
+        return cmdAdd(pkgs);
+    }
+    if (cmd == "clone" && (args.size() == 2 ||
+                           (args.size() == 3 && args[2] == "--full")))
+        return cmdClone(args[1], args.size() == 3);
+    if (cmd == "list") {
+        if (args.size() == 1) return cmdList();
+        if (args.size() == 2 && args[1] == "online") return cmdListOnline();
+    }
+    if (cmd == "build") return cmdBuild(args, 1);
     if (cmd == "doc" && (args.size() == 2 ||
                          (args.size() == 4 && args[2] == "--port"))) {
         int port = args.size() == 4 ? atoi(args[3].c_str()) : 8080;

@@ -413,12 +413,17 @@ void Interpreter::collectProgram(const Stmt& program) {
                     Value real = loadModuleFile(s.moduleName);
                     if (real.k != VK::None) {
                         // unaliased imports bind the last path segment
+                        // ("util.co" -> util, "a/b.co" -> b)
                         std::string bind = s.importAlias;
                         if (bind.empty()) {
-                            size_t cut = s.moduleName.find_last_of("/.");
+                            std::string mn = s.moduleName;
+                            if (mn.size() > 3 &&
+                                mn.compare(mn.size() - 3, 3, ".co") == 0)
+                                mn.erase(mn.size() - 3);
+                            size_t cut = mn.find_last_of("/.");
                             bind = cut == std::string::npos
-                                       ? s.moduleName
-                                       : s.moduleName.substr(cut + 1);
+                                       ? mn
+                                       : mn.substr(cut + 1);
                         }
                         globals_->vars[bind] = real;
                     } else {
@@ -662,7 +667,12 @@ static bool resolvePackageEntry(const std::string& dir, std::string& out) {
     return false;
 }
 
-Value Interpreter::loadModuleFile(const std::string& dotted) {
+Value Interpreter::loadModuleFile(const std::string& dottedRaw) {
+    // accept explicit ".co" suffixes (import "file1.co")
+    std::string dotted = dottedRaw;
+    if (dotted.size() > 3 &&
+        dotted.compare(dotted.size() - 3, 3, ".co") == 0)
+        dotted.erase(dotted.size() - 3);
     auto hit = loadedModules_.find(dotted);
     if (hit != loadedModules_.end()) {
         Value m = Value::module(dotted);
