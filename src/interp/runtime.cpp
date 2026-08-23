@@ -7,6 +7,7 @@
 #include "lex/lexer.h"
 #include "parser/parser.h"
 #include "sema/checker.h"
+#include "util/tomlmini.h"
 
 #include <algorithm>
 #include <chrono>
@@ -501,6 +502,19 @@ void Interpreter::installBuiltins() {
         return Value::chr((char32_t)n);
     });
 
+    globals_->vars["assert"] =
+        biFn({"cond"}, [](std::vector<Value>& a) -> Value {
+            if (a[0].k != VK::Bool || !a[0].b) panicHere("assertion failed");
+            return Value::none();
+        });
+    globals_->vars["assert_eq"] =
+        biFn({"a", "b"}, [this](std::vector<Value>& a) -> Value {
+            if (!valuesEqual(a[0], a[1]))
+                panicHere("assertion failed: " + toStr(a[0]) + " != " +
+                          toStr(a[1]));
+            return Value::none();
+        });
+
     globals_->vars["range"] = biFn({"start", "stop"},
                                    [](std::vector<Value>& a) -> Value {
                                        if (a.size() == 1)
@@ -603,25 +617,17 @@ static bool readFileIfExists(const std::string& path, std::string& out) {
 }
 
 // entry-file convention inside an installed package directory:
-//   coco.json "main" -> mod.co -> <dirname>.co -> lone top-level *.co
+//   coco.toml [package] main = "..." -> mod.co -> <dirname>.co -> lone *.co
 static bool resolvePackageEntry(const std::string& dir, std::string& out) {
     std::string manifest;
-    if (readFileIfExists(dir + "/coco.json", manifest)) {
-        size_t p = manifest.find("\"main\"");
-        if (p != std::string::npos) {
-            size_t c0 = manifest.find('"', manifest.find(':', p) + 1);
-            size_t c1 =
-                c0 == std::string::npos ? std::string::npos
-                                        : manifest.find('"', c0 + 1);
-            if (c0 != std::string::npos && c1 != std::string::npos) {
-                std::string mainf = manifest.substr(c0 + 1, c1 - c0 - 1);
-                std::string probe;
-                if (!mainf.empty() && readFileIfExists(dir + "/" + mainf,
-                                                       probe)) {
-                    out = dir + "/" + mainf;
-                    return true;
-                }
-            }
+    if (readFileIfExists(dir + "/coco.toml", manifest)) {
+        coco::tomlmini::Doc doc = coco::tomlmini::parse(manifest);
+        std::string mainf = coco::tomlmini::get(doc, "package", "main");
+        std::string probe;
+        if (!mainf.empty() &&
+            readFileIfExists(dir + "/" + mainf, probe)) {
+            out = dir + "/" + mainf;
+            return true;
         }
     }
     const char* defaults[] = {"/mod.co"};
@@ -667,33 +673,35 @@ Value Interpreter::loadModuleFile(const std::string& dotted) {
     // import paths may use '.' or '/' separators (stdlib vs github style)
     std::string rel;
     for (char c : dotted) rel += (c == '.' || c == '/') ? '/' : c;
+    std::string key = rel;                 // embedded-source lookup key
     rel += ".co";
 
-    std::string found;
-    for (const auto& dir : stdlibDirs_) {
-        std::string cand = dir + "/" + rel;
-        std::string probe;
-        if (readFileIfExists(cand, probe)) {
-            found = cand;
-            break;
+    std::string found, src;
+    auto emb = embeddedSources_.find(key);
+    if (emb != embeddedSources_.end()) {
+        src = emb->second;
+    } else {
+        for (const auto& dir : stdlibDirs_) {
+            std::string cand = dir + "/" + rel;
+            if (readFileIfExists(cand, src)) {
+                found = cand;
+                break;
+            }
+            // package directory (installed under coco_libs/): use entry file
+            std::string pkgDir =
+                dir + "/" + rel.substr(0, rel.size() - 3);   // strip ".co"
+            if (!pkgDir.empty() && std::filesystem::is_directory(pkgDir) &&
+                resolvePackageEntry(pkgDir, found)) {
+                readFileIfExists(found, src);
+                break;
+            }
         }
-        // package directory (installed under coco_modules/): use its entry file
-        std::string pkgDir = dir + "/" +
-                             rel.substr(0, rel.size() - 3);   // strip ".co"
-        if (!pkgDir.empty() && std::filesystem::is_directory(pkgDir) &&
-            resolvePackageEntry(pkgDir, probe)) {
-            found = probe;
-            break;
+        if (found.empty()) {
+            Value missing;
+            missing.k = VK::None;      // sentinel: not a file-backed module
+            return missing;
         }
     }
-    if (found.empty()) {
-        Value missing;
-        missing.k = VK::None;      // sentinel: not a file-backed module
-        return missing;
-    }
-
-    std::string src;
-    readFileIfExists(found, src);
 
     DiagEngine diags;
     auto toks = Lexer(src, found, diags).lexAll();

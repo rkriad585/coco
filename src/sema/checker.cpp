@@ -256,6 +256,9 @@ void Checker::predeclareBuiltins() {
                     false, 1);
     makeBuiltinFunc("ord", {charTy()}, {"c"}, intTy(), false, 1);
     makeBuiltinFunc("chr", {intTy()}, {"n"}, charTy(), false, 1);
+    makeBuiltinFunc("assert", {boolTy()}, {"cond"}, noneTy(), false, 1);
+    makeBuiltinFunc("assert_eq", {unkTy(), unkTy()}, {"a", "b"}, noneTy(),
+                    false, 2);
 
     // keyword constants
     declareConst("true", boolTy());

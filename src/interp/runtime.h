@@ -130,6 +130,7 @@ private:
     Value moduleMember(const std::string& mod, const std::string& name);
     // real stdlib: load <dir>/<dotted/path>.co as an isolated module namespace
     std::vector<std::string> stdlibDirs_;
+    std::map<std::string, std::string> embeddedSources_;  // baked-in modules
     std::map<std::string, Env> loadedModules_;
     std::map<std::string, std::vector<ast::StmtP>> moduleAstCache_;
     Value loadModuleFile(const std::string& dotted);
@@ -147,6 +148,13 @@ public:
     void threadEntry(Value callee, std::vector<Value> args);
     // directories searched for stdlib modules (dotted imports -> files)
     void addStdlibDir(const std::string& dir) { stdlibDirs_.push_back(dir); }
+    // sources embedded at build time; win over every disk search path
+    void addEmbeddedSource(const std::string& name, const std::string& src) {
+        std::string key;
+        for (char c : name)
+            key += (c == '.' || c == '/' || c == '\\') ? '/' : c;
+        embeddedSources_[key] = src;
+    }
 };
 
 } // namespace interp

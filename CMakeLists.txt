@@ -51,7 +51,7 @@ add_executable(cocorun tools/cocorun.cpp)
 target_link_libraries(cocorun PRIVATE coco_interp)
 
 add_executable(coco tools/coco.cpp)
-target_link_libraries(coco PRIVATE coco_interp)
+target_link_libraries(coco PRIVATE coco_interp ws2_32)
 
 foreach(tgt coco_lex coco_ast coco_parser coco_sema)
     if(MSVC)
