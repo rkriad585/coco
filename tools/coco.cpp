@@ -1721,7 +1721,8 @@ struct BuildOpts {
     bool sasm = false;       // -S  human-readable assembly listing (.sasm)
     bool obj = false;        // -O  native object file (.obj + .lib via lib.exe)
     bool bytecode = false;   // -B  portable bytecode bundle (.cob)
-    std::string target;      // --target=<os>-<arch>; empty -> host
+    std::string target;      // --target=<os>-<arch>; empty -> $COCO_TARGET -> host
+    std::string outPath;     // -o <path> (Go build -o)
 };
 
 std::string hostTarget() {
@@ -1742,14 +1743,81 @@ std::string hostTarget() {
     return os + "-" + arch;
 }
 
-bool validTarget(const std::string& t) {
-    static const char* kKnown[] = {
-        "windows-amd64", "windows-arm64", "linux-amd64", "linux-arm64",
-        "darwin-amd64",  "darwin-arm64",
+// ---- target matrix (Go's GOOS/GOARCH model) ---------------------------------
+// Like `go tool dist list`, this table is the source of truth for what can be
+// built. Each entry knows its binary suffix and which cross C++ toolchains can
+// produce it; users override via COCO_CXX_<TARGET> (e.g. COCO_CXX_LINUX_AMD64).
+struct TargetInfo {
+    const char* triple;
+    const char* exeExt;      // ".exe" or ""
+    bool isWindows;
+    std::vector<std::string> cxxCandidates;
+};
+
+const std::vector<TargetInfo>& targetMatrix() {
+    static const std::vector<TargetInfo> kTargets = {
+        {"windows-amd64", ".exe", true,
+         {"x86_64-w64-mingw32-g++", "x86_64-w64-mingw32-clang++"}},
+        {"windows-arm64", ".exe", true,
+         {"aarch64-w64-mingw32-g++", "aarch64-w64-mingw32-clang++"}},
+        {"linux-amd64", "", false,
+         {"x86_64-linux-gnu-g++", "x86_64-linux-gnu-c++",
+          "x86_64-linux-musl-g++"}},
+        {"linux-arm64", "", false,
+         {"aarch64-linux-gnu-g++", "aarch64-linux-gnu-c++",
+          "aarch64-linux-musl-g++"}},
+        {"darwin-amd64", "", false,
+         {"o64-clang++", "x86_64-apple-darwin-clang++"}},
+        {"darwin-arm64", "", false,
+         {"oa64-clang++", "aarch64-apple-darwin-clang++"}},
     };
-    for (const char* k : kKnown)
-        if (t == k) return true;
-    return false;
+    return kTargets;
+}
+
+const TargetInfo* findTarget(const std::string& t) {
+    for (const auto& ti : targetMatrix())
+        if (t == ti.triple) return &ti;
+    return nullptr;
+}
+
+bool validTarget(const std::string& t) { return findTarget(t) != nullptr; }
+
+bool toolchainWorks(const std::string& cxx) {
+    std::string probe =
+        "cd . && \"" + cxx + "\" --version >nul 2>nul";
+    return std::system(probe.c_str()) == 0;
+}
+
+// CC_FOR_<GOOS>_<GOARCH>-style override: COCO_CXX_<TRIPLE>, then PATH probing
+std::string resolveCrossCxx(const TargetInfo* ti) {
+    std::string envName = "COCO_CXX_";
+    for (const char* p = ti->triple; *p; ++p)
+        envName += (*p == '-') ? '_' : (char)toupper((unsigned char)*p);
+    if (const char* env = std::getenv(envName.c_str())) {
+        if (toolchainWorks(env)) return env;
+        std::cerr << "coco build: warning: $" << envName << "=" << env
+                  << " is not runnable, probing PATH\n";
+    }
+    if (const char* any = std::getenv("COCO_CXX"))
+        if (toolchainWorks(any)) return any;
+    for (const auto& cand : ti->cxxCandidates)
+        if (toolchainWorks(cand)) return cand;
+    return "";
+}
+
+// every runtime source needed to build a self-contained launcher from scratch
+std::vector<std::string> collectRuntimeSources(const std::string& srcRoot) {
+    std::vector<std::string> out;
+    std::error_code ec;
+    for (fs::recursive_directory_iterator it(srcRoot, ec), end;
+         !ec && it != end; it.increment(ec)) {
+        if (ec) break;
+        if (it->is_regular_file(ec) &&
+            it->path().extension() == ".cpp")
+            out.push_back(it->path().generic_string());
+    }
+    std::sort(out.begin(), out.end());
+    return out;
 }
 
 // resolve module sources transitively from the entry file
@@ -2191,28 +2259,56 @@ int buildApp(const Manifest& m, const BuildOpts& opts) {
     std::map<std::string, std::string> embedded;
     gatherEmbedded(entry, mainSrc, embedded);
 
-    if (opts.bytecode || opts.target != hostTarget()) {
+    // Go-style decision point: a cross toolchain produces a real native
+    // binary for the target; without one we fall back to portable bytecode.
+    // An explicit COCO_CXX* override forces the GNU path even for the host
+    // triple (mirrors setting CC on a native Go build).
+    const bool isHost = opts.target == hostTarget();
+    const TargetInfo* ti = findTarget(opts.target);
+    std::string forced;
+    {
+        std::string envName = "COCO_CXX_";
+        for (char p : opts.target)
+            envName += (p == '-') ? '_' : (char)toupper((unsigned char)p);
+        if (std::getenv(envName.c_str()) || std::getenv("COCO_CXX"))
+            forced = "1";
+    }
+    std::string crossCxx =
+        ti && (!isHost || !forced.empty()) ? resolveCrossCxx(ti) : "";
+
+    if (opts.bytecode || (!isHost && crossCxx.empty())) {
         const std::string out =
             (outDir / (m.name + ".cob")).generic_string();
         writeFile(out, emitCob(mainSrc, embedded));
-        if (opts.bytecode && opts.target == hostTarget())
+        if (opts.bytecode && isHost)
             std::cout << "wrote bytecode bundle " << out << " ("
                       << (embedded.size() + 1) << " modules)\n";
-        else
-            std::cout << "cross-target " << opts.target
-                      << ": wrote portable bundle " << out
-                      << " (native codegen needs that host's toolchain)\n";
+        else {
+            std::cout << "no cross toolchain for '" << opts.target
+                      << "' - wrote portable bundle " << out << "\n"
+                      << "  install e.g. llvm-mingw / aarch64-linux-gnu-g++"
+                      << " or set COCO_CXX_" ;
+            for (char c : opts.target)
+                std::cout << (c == '-' ? '_' : (char)toupper((unsigned char)c));
+            std::cout << "=<path-to-g++>\n";
+        }
         if (!opts.obj) return 0;
     }
 
     // emit launcher .cpp embedding every reachable source
     std::ostringstream o;
     o << "// generated by coco build - standalone Coco program\n";
+    o << "#define COCO_APP_NAME " << coco::tomlmini::quote(m.name) << "\n"
+      << "#define COCO_APP_VERSION "
+      << coco::tomlmini::quote(m.version.empty() ? "0.0.0" : m.version) << "\n"
+      << "#define COCO_APP_TARGET " << coco::tomlmini::quote(opts.target)
+      << "\n\n";
     o << "#include \"interp/runtime.h\"\n"
       << "#include \"lex/lexer.h\"\n"
       << "#include \"parser/parser.h\"\n"
       << "#include \"sema/checker.h\"\n\n"
-      << "#include <cstdio>\n#include <fstream>\n#include <iostream>\n"
+      << "#include <cstdio>\n#include <cstring>\n#include <fstream>\n"
+      << "#include <iostream>\n"
       << "#include <sstream>\n\n";
     o << "static const char* kMainSrc = " << cppRawLiteral(mainSrc) << ";\n";
     auto cIdent = [](const std::string& k) {
@@ -2229,7 +2325,13 @@ int buildApp(const Manifest& m, const BuildOpts& opts) {
     for (const auto& [key, src] : embedded)
         o << "    {\"" << key << "\", kMod_" << cIdent(key) << "},\n";
     o << "};\n\n"
-      << "int main() {\n"
+      << "int main(int argc, char** argv) {\n"
+      << "    if (argc > 1 && (std::strcmp(argv[1], \"--version\") == 0 ||\n"
+      << "                     std::strcmp(argv[1], \"-V\") == 0)) {\n"
+      << "        std::printf(\"%s v%s (%s)\\n\", COCO_APP_NAME,\n"
+      << "                    COCO_APP_VERSION, COCO_APP_TARGET);\n"
+      << "        return 0;\n"
+      << "    }\n"
       << "    coco::DiagEngine diags;\n"
       << "    auto toks = coco::Lexer(kMainSrc, \"main.co\", diags).lexAll();\n"
       << "    if (diags.count()) { std::cerr << \"embedded source error\\n\"; "
@@ -2259,6 +2361,71 @@ int buildApp(const Manifest& m, const BuildOpts& opts) {
 
     writeFile((outDir / (m.name + ".cpp")).generic_string(), o.str());
 
+    // ---- Go-style cross build: one self-contained static binary ----------
+    // Compiles the generated launcher TOGETHER WITH the whole Coco runtime
+    // (src/**/*.cpp) using the target's C++ toolchain - the analogue of
+    // CGO_ENABLED=0: no prebuilt host libs, nothing external.
+    // crossCxx is non-empty exactly when we want the GNU pipeline:
+    // non-host target with a found/overridden toolchain, or an explicit
+    // COCO_CXX* override even on the host triple.
+    if (!crossCxx.empty()) {
+        char xbuf[MAX_PATH * 2];
+        GetModuleFileNameA(nullptr, xbuf, sizeof xbuf);
+        std::string xroot(xbuf);
+        size_t xs = xroot.find_last_of("/\\");
+        std::string binRoot2 = xs == std::string::npos ? "." : xroot.substr(0, xs);
+        const std::string srcRoot = (fs::path(binRoot2) / ".." / "src").generic_string();
+        auto srcs = collectRuntimeSources(srcRoot);
+        if (srcs.empty()) {
+            std::cerr << "coco build: runtime sources not found at "
+                      << srcRoot << " (needed for cross builds)\n";
+            return 1;
+        }
+        const std::string outName =
+            opts.outPath.empty()
+                ? (outDir / (m.name + (ti ? ti->exeExt : ".exe")))
+                      .generic_string()
+                : opts.outPath;
+        {
+            fs::path op(outName);
+            if (op.has_parent_path()) fs::create_directories(op.parent_path());
+        }
+
+        // response file keeps the command line short
+        const std::string rsp = (outDir / "cross.rsp").generic_string();
+        const std::string launcherCpp =
+            (outDir / (m.name + ".cpp")).generic_string();
+        {
+            std::ostringstream r;
+            r << "-std=c++20 -D_CRT_SECURE_NO_WARNINGS ";
+            r << (opts.release ? "-O2 -s -w" : "-O1 -g") << " ";
+            if (ti && ti->isWindows)
+                r << "-static-libgcc -static-libstdc++ ";
+            r << "-I\"" << srcRoot << "\" ";
+            r << "-o \"" << fs::absolute(outName).generic_string() << "\" ";
+            r << "\"" << fs::absolute(launcherCpp).generic_string() << "\"";
+            for (const auto& s : srcs) r << " \"" << s << "\"";
+            if (ti && ti->isWindows) r << " -lws2_32";
+            writeFile(rsp, r.str());
+        }
+        std::cout << "cross-compiling with " << crossCxx << " -> "
+                  << outName << " (" << srcs.size() + 1
+                  << " translation units)\n";
+        std::string cmd =
+            "cd . && \"" + crossCxx + "\" @\"" +
+            fs::absolute(rsp).generic_string() + "\"";
+        if (std::getenv("COCO_VERBOSE")) std::cerr << "[cmd] " << cmd << "\n";
+        int rc = std::system(cmd.c_str());
+        if (rc != 0) {
+            std::cerr << "coco build: cross-compilation failed (" << rc
+                      << ")\n";
+            return rc == 0 ? 1 : rc;
+        }
+        std::cout << "built " << outName << "\n";
+        return 0;
+    }
+
+    // ---- host build via the prebuilt MSVC runtime libs -------------------
     // compile with the same toolchain cmake uses
     const char* cl = std::getenv("COCO_CL");
     std::string clPath =
@@ -2273,7 +2440,9 @@ int buildApp(const Manifest& m, const BuildOpts& opts) {
     // NOTE: must not start with '"' — cmd /c strips leading quotes.
     // NOTE: no quoted paths ending in '\' (argv would eat the quote).
     const std::string genCpp = (outDir / (m.name + ".cpp")).generic_string();
-    const std::string outBase = (outDir / m.name).generic_string();
+    const std::string outBase =
+        opts.outPath.empty() ? (outDir / m.name).generic_string()
+                             : opts.outPath;
     if (opts.obj) {
         // -O: object file (+ static .lib via lib.exe); host toolchain only
         if (opts.target != hostTarget()) {
@@ -2311,22 +2480,29 @@ int buildApp(const Manifest& m, const BuildOpts& opts) {
     }
 
     std::string flags = detectRuntimeFlags(binRoot);
+    std::string exeOut = outBase;
+    if (exeOut.size() < 4 ||
+        _stricmp(exeOut.c_str() + exeOut.size() - 4, ".exe") != 0)
+        exeOut += ".exe";
+    {
+        fs::path op(exeOut);
+        if (op.has_parent_path()) fs::create_directories(op.parent_path());
+    }
     std::string cmd =
         "cd . && \"" + clPath + "\" /nologo /EHsc " + flags + " /std:c++20" +
         " /I\"" + binRoot + "\\..\\src\""
         " /Fobuild\\ " + genCpp +
-        " /Fe:" + outBase + ".exe /link /LIBPATH:\"" + binRoot +
+        " /Fe:" + exeOut + " /link /LIBPATH:\"" + binRoot +
         "\" coco_interp.lib coco_sema.lib coco_parser.lib"
         " coco_ast.lib coco_lex.lib";
     if (std::getenv("COCO_VERBOSE")) std::cerr << "[cmd] " << cmd << "\n";
-    std::cout << "compiling " << profile << "/" << opts.target << "/"
-              << m.name << ".exe ...\n";
+    std::cout << "compiling " << exeOut << " ...\n";
     int rc = std::system(cmd.c_str());
     if (rc != 0) {
         std::cerr << "coco build: compilation failed (" << rc << ")\n";
         return rc == 0 ? 1 : rc;
     }
-    std::cout << "built " << outBase << ".exe\n";
+    std::cout << "built " << exeOut << "\n";
     return 0;
 }
 
@@ -2398,16 +2574,22 @@ int cmdBuild(const std::vector<std::string>& args, size_t from) {
             opts.target = a.substr(9);
         else if (a == "--target" && i + 1 < args.size())
             opts.target = args[++i];
+        else if (a == "-o" && i + 1 < args.size())
+            opts.outPath = args[++i];
+        else if (a.rfind("--output=", 0) == 0)
+            opts.outPath = a.substr(9);
         else {
             std::cerr << "coco build: unknown option '" << a << "'\n";
             return 64;
         }
     }
+    if (opts.target.empty() && std::getenv("COCO_TARGET"))
+        opts.target = std::getenv("COCO_TARGET");   // GOOS/GOARCH analogue
     if (opts.target.empty()) opts.target = hostTarget();
     if (!validTarget(opts.target)) {
         std::cerr << "coco build: unknown target '" << opts.target
-                  << "'\n  known: windows-amd64, windows-arm64, linux-amd64,"
-                     " linux-arm64, darwin-amd64, darwin-arm64\n";
+                  << "' (like 'unknown GOOS' in Go)\n"
+                  << "run 'coco targets' for the supported matrix\n";
         return 64;
     }
     Manifest m = readManifest(".");
@@ -2481,6 +2663,35 @@ int unpackCocolib(const std::string& raw, bool global_) {
 
 // ---------------------------------------------------------------------------
 
+// coco targets - the `go tool dist list` analogue: every supported
+// GOOS/GOARCH-style triple, marked with what this machine can produce.
+int cmdTargets() {
+    const std::string host = hostTarget();
+    std::cout << "TARGET" << std::string(14, ' ') << "BINARY   TOOLCHAIN\n";
+    for (const auto& ti : targetMatrix()) {
+        std::string t = ti.triple;
+        std::cout << t << std::string(20 - t.size(), ' ')
+                  << (ti.isWindows ? "<name>.exe" : "<name>")
+                  << std::string(7, ' ');
+        if (t == host)
+            std::cout << "(host - prebuilt MSVC libs)\n";
+        else {
+            std::string cxx = resolveCrossCxx(&ti);
+            if (!cxx.empty())
+                std::cout << cxx << "\n";
+            else {
+                std::string envName = "COCO_CXX_";
+                for (const char* p = ti.triple; *p; ++p)
+                    envName +=
+                        (*p == '-') ? '_' : (char)toupper((unsigned char)*p);
+                std::cout << "- portable bytecode only"
+                          << " (set " << envName << "=<g++> for native)\n";
+            }
+        }
+    }
+    return 0;
+}
+
 void usage() {
     std::cout
         << "coco - the Coco language driver\n\n"
@@ -2503,10 +2714,13 @@ void usage() {
         << "  coco clone <repo> [--full]       clone any repo (shorthand:"
                " user/repo)\n"
         << "  coco build [--release|--debug]   compile project\n"
-        << "           [--target=<os>-<arch>]    targets: windows|linux|"
-               "darwin - amd64|arm64\n"
+        << "           [--target=<os>-<arch>]    like GOOS/GOARCH; default "
+               "$COCO_TARGET or host\n"
         << "           [-S|-O|-B]                -S asm listing, -O .obj+."
                "lib, -B bytecode\n"
+        << "           [-o <path>]               output path (Go build -o)\n"
+        << "  coco targets                     list all supported target "
+               "triples\n"
         << "  coco build lib                   check + pack -> "
                "build/<profile>/<t>/<n>-<v>.cocolib\n"
         << "  coco doc <lib|dir> [--port N]    serve markdown docs + API ref\n"
@@ -2589,6 +2803,8 @@ int main(int argc, char** argv) {
         if (args.size() == 1) return cmdList();
         if (args.size() == 2 && args[1] == "online") return cmdListOnline();
     }
+    if (cmd == "targets" || cmd == "dist")
+        return cmdTargets();
     if (cmd == "build") return cmdBuild(args, 1);
     if (cmd == "doc" && (args.size() == 2 ||
                          (args.size() == 4 && args[2] == "--port"))) {
