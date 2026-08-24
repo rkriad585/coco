@@ -1,15 +1,18 @@
 # 29 — Arena allocation for bulk patterns (plan §6.1)
-def render_frame():
-    arena = mem.Arena()                  # O(1) wholesale free at scope end
-    defer arena.reset()
+def render_frame() {
+    arena = mem.Arena(); # O(1) wholesale free at scope end
+    defer arena.reset();
 
-    parts = []
-    for i in 0..=1000:
-        parts.append(arena.alloc(f"sprite-{i}"))   # allocated from the arena
+    parts = [];
+    for i in 0..=1000 {
+        parts.append(arena.alloc(f"sprite-{i}")); # allocated from the arena
         # no per-object refcount traffic, no individual frees
 
-    print(len(parts), parts[0])
+}
+    print(len(parts), parts[0]);
 
-def main():
-    render_frame()
-    print("frame memory released in one operation")
+}
+def main() {
+    render_frame();
+    print("frame memory released in one operation");
+}

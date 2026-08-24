@@ -49,10 +49,25 @@ ast::Span Parser::spanHere() const { return ast::Span{cur().line, cur().col}; }
 void Parser::skipNewlines() { while (at(Tok::Newline)) advance(); }
 
 void Parser::syncToStatementEnd() {
+    // C-style recovery: skip to the ';' that ends the broken statement,
+    // or bail out of the current block at its closing '}'.
+    int depth = 0;
     while (!at(Tok::Eof)) {
-        if (at(Tok::Newline)) { advance(); return; }
-        if (at(Tok::Dedent)) { advance(); return; }     // must consume: guarantees
-        advance();                                      // progress after recovery
+        if (cur().kind == Tok::Punct) {
+            const std::string& x = cur().text;
+            if (x == "{" || x == "(" || x == "[") {
+                ++depth;
+            } else if (x == "}" ) {
+                if (depth == 0) { advance(); return; }
+                --depth;
+            } else if (x == ")" || x == "]") {
+                if (depth > 0) --depth;
+            } else if (x == ";" && depth == 0) {
+                advance();
+                return;
+            }
+        }
+        advance();
     }
 }
 
@@ -93,7 +108,10 @@ std::vector<ast::StmtP> Parser::parseProgram() {
     std::vector<ast::StmtP> out;
     skipNewlines();
     while (!at(Tok::Eof)) {
-        if (at(Tok::Dedent)) { advance(); continue; }   // stray dedent: drop
+        if (atPunct("}")) {                             // stray closer: drop
+            advance();
+            continue;
+        }
         try {
             auto s = parseTopOrStmt();
             if (s) out.push_back(std::move(s));
@@ -123,6 +141,7 @@ ast::StmtP Parser::parseTopOrStmt() {
         advance();
         auto s = parseFuncDef(false, false);
         s->externDef = true;
+        expectPunct(";");                               // extern decls end with ';'
         return s;
     }
     if (atIdent("struct")) return parseStructDef();
@@ -229,14 +248,15 @@ ast::StmtP Parser::parseStructDef() {
     advance();
     s->name = expect(Tok::Ident, "struct name").text;
     if (atPunct("[")) s->typeParams = parseTypeParams();
-    expectPunct(":");
-    expect(Tok::Newline, "newline after struct header");
-    expect(Tok::Indent, "indented struct body");
+    expectPunct("{");
 
     for (;;) {                                          // fields then methods
-        skipNewlines();
-        if (at(Tok::Dedent)) { advance(); break; }
-        if (at(Tok::Eof)) break;
+        if (atPunct("}")) { advance(); break; }
+        if (at(Tok::Eof)) {
+            diags_.report(cur().line, cur().col,
+                          "unexpected end of file inside struct body");
+            throw Abort("structeof");
+        }
         if (atIdent("def")) {
             s->body.push_back(parseFuncDef(false));
             continue;
@@ -253,6 +273,7 @@ ast::StmtP Parser::parseStructDef() {
         expectPunct(":");
         f.type = parseType();
         if (atOp("=")) { advance(); f.defaultValue = parseExpr(); }
+        expectPunct(";");                               // fields end with ';'
         s->fields.push_back(std::move(f));
     }
     return s;
@@ -261,8 +282,8 @@ ast::StmtP Parser::parseStructDef() {
 std::vector<ast::Variant> Parser::parseVariants() {
     std::vector<ast::Variant> out;
     for (;;) {
-        skipNewlines();
-        if (at(Tok::Dedent) || at(Tok::Eof)) break;
+        if (atPunct("}") || at(Tok::Eof)) break;
+        if (atPunct(",")) { advance(); continue; }      // trailing comma
         ast::Variant v;
         v.span = spanHere();
         v.name = expect(Tok::Ident, "variant name").text;
@@ -292,11 +313,9 @@ ast::StmtP Parser::parseEnumDef() {
     advance();
     s->name = expect(Tok::Ident, "enum name").text;
     if (atPunct("[")) s->typeParams = parseTypeParams();
-    expectPunct(":");
-    expect(Tok::Newline, "newline after enum header");
-    expect(Tok::Indent, "indented enum body");
+    expectPunct("{");
     s->variants = parseVariants();
-    if (!at(Tok::Eof)) expect(Tok::Dedent, "dedent");
+    expectPunct("}");
     return s;
 }
 
@@ -307,38 +326,36 @@ ast::StmtP Parser::parseTraitDef() {
     advance();
     s->name = expect(Tok::Ident, "trait name").text;
     if (atPunct("[")) s->typeParams = parseTypeParams();
-    expectPunct(":");
-    expect(Tok::Newline, "newline after trait header");
-    expect(Tok::Indent, "indented trait body");
+    expectPunct("{");
 
     for (;;) {
-        skipNewlines();
-        if (at(Tok::Dedent)) { advance(); break; }
-        if (at(Tok::Eof)) break;
+        if (atPunct("}")) { advance(); break; }
+        if (at(Tok::Eof)) {
+            diags_.report(cur().line, cur().col,
+                          "unexpected end of file inside trait body");
+            throw Abort("traiteof");
+        }
         size_t startIdx = idx_;
         expect(Tok::Ident, "'def'");                    // consumes 'def'
         auto nameTok = expect(Tok::Ident, "method name");
-        bool hasBodyColon = false;
+        bool hasBody = false;
         {
-            // scan past optional generics/params/ret to see what terminates
+            // scan past optional generics/params/ret: '{' = default body,
+            // ';' = signature-only
             size_t j = idx_;
             int depth = 0;
             for (; j < toks_.size(); ++j) {
                 const Token& t = toks_[j];
-                if (t.kind == Tok::Newline || t.kind == Tok::Dedent ||
-                    t.kind == Tok::Eof)
-                    break;
+                if (t.kind == Tok::Eof) break;
                 if (t.kind == Tok::Punct) {
                     if (t.text == "(" || t.text == "[") ++depth;
                     else if (t.text == ")" || t.text == "]") --depth;
-                    else if (depth == 0 && t.text == ":") break;   // body follows
+                    else if (depth == 0 && t.text == "{") { hasBody = true; break; }
+                    else if (depth == 0 && t.text == ";") break;
                 }
-                // '.' inside qualified return types must NOT end the scan
             }
-            hasBodyColon = j < toks_.size() && toks_[j].kind == Tok::Punct &&
-                           toks_[j].text == ":";
         }
-        if (hasBodyColon) {                             // default body
+        if (hasBody) {                                  // default body
             idx_ = startIdx;
             s->body.push_back(parseFuncDef(false));
         } else {                                        // signature-only
@@ -352,7 +369,7 @@ ast::StmtP Parser::parseTraitDef() {
             sig.ret = std::move(ret);
             sig.span = ast::Span{nameTok.line, nameTok.col};
             s->sigs.push_back(std::move(sig));
-            expect(Tok::Newline, "newline after trait method signature");
+            expectPunct(";");                           // sigs end with ';'
         }
     }
     return s;
@@ -388,6 +405,7 @@ ast::StmtP Parser::finishConstDecl() {
     if (atPunct(":")) { advance(); s->declType = parseType(); }
     expectOp("=");
     s->value = parseExpr();
+    expectPunct(";");
     return s;
 }
 
@@ -428,7 +446,7 @@ ast::StmtP Parser::parseImport(bool from, bool exportKw) {
             throw Abort("fromimp");
         }
         advance();
-        if (atOp("*")) { advance(); s->starImport = true; return s; }
+        if (atOp("*")) { advance(); s->starImport = true; expectPunct(";"); return s; }
         for (;;) {
             auto n = expect(Tok::Ident, "imported name");
             ast::Stmt::ImportItem it{n.text, {}};
@@ -437,12 +455,14 @@ ast::StmtP Parser::parseImport(bool from, bool exportKw) {
             if (atPunct(",")) { advance(); continue; }
             break;
         }
+        expectPunct(";");
         return s;
     }
 
     expect(Tok::Ident, "'import'");                     // consume 'import'
     dottedName();
     if (atIdent("as")) { advance(); s->importAlias = expect(Tok::Ident, "alias").text; }
+    expectPunct(";");
     return s;
 }
 
@@ -451,13 +471,15 @@ ast::StmtP Parser::parseImport(bool from, bool exportKw) {
 // ---------------------------------------------------------------------------
 
 std::vector<ast::StmtP> Parser::parseBlock() {
-    expectPunct(":");
-    expect(Tok::Newline, "newline after ':'");
-    expect(Tok::Indent, "indented block");
+    expectPunct("{");
     std::vector<ast::StmtP> body;
     for (;;) {
-        skipNewlines();
-        if (at(Tok::Dedent) || at(Tok::Eof)) break;     // Dedent consumed by caller
+        if (atPunct("}")) break;                        // caller consumes via endBlock
+        if (at(Tok::Eof)) {
+            diags_.report(cur().line, cur().col,
+                          "unexpected end of file inside block (missing '}')");
+            throw Abort("blockeof");
+        }
         try {
             body.push_back(parseTopOrStmt());
         } catch (Abort&) {
@@ -468,8 +490,7 @@ std::vector<ast::StmtP> Parser::parseBlock() {
 }
 
 void Parser::endBlock() {
-    skipNewlines();
-    if (at(Tok::Dedent)) advance();
+    if (atPunct("}")) advance();
 }
 
 ast::StmtP Parser::parseIfChain() {
@@ -478,21 +499,22 @@ ast::StmtP Parser::parseIfChain() {
     s->span = spanHere();
     advance();                                          // if | elif
     s->exprs.push_back(parseExpr());                    // condition in exprs[0]
-    s->body = parseBlock();                             // stops AT the Dedent
+    s->body = parseBlock();
+    endBlock();
 
-    // The lexer emits DEDENT before a same-level elif/else: peek past it.
-    if (at(Tok::Dedent) && (atIdent("elif", 1) || atIdent("else", 1))) {
-        advance();
+    if (atIdent("elif") || atIdent("else")) {
         if (atIdent("elif")) {
-            s->elseBody.push_back(parseIfChain());      // consumes own tail dedent
+            s->elseBody.push_back(parseIfChain());      // legacy alias
             return s;
         }
         advance();                                      // else
+        if (atIdent("if")) {                            // else-if chain
+            s->elseBody.push_back(parseIfChain());
+            return s;
+        }
         s->elseBody = parseBlock();
         endBlock();
-        return s;
     }
-    endBlock();
     return s;
 }
 
@@ -530,12 +552,9 @@ ast::StmtP Parser::parseCompound() {
         advance();
         s->kind = ast::StKind::Match;
         s->exprs.push_back(parseExpr());
-        expectPunct(":");
-        expect(Tok::Newline, "newline after match subject");
-        expect(Tok::Indent, "indented match arms");
+        expectPunct("{");
         for (;;) {
-            skipNewlines();
-            if (at(Tok::Dedent) || at(Tok::Eof)) break;
+            if (atPunct("}") || at(Tok::Eof)) break;    // '}' via endBlock below
             expect(Tok::Ident, "'case'");               // consumes 'case'
             ast::Stmt::Arm arm;
             arm.pat = parsePattern();
@@ -544,19 +563,16 @@ ast::StmtP Parser::parseCompound() {
             endBlock();
             s->arms.push_back(std::move(arm));
         }
-        if (!at(Tok::Eof)) expect(Tok::Dedent, "dedent after match arms");
+        endBlock();
         return s;
     }
 
     if (atIdent("select")) {
         advance();
         s->kind = ast::StKind::Select;
-        expectPunct(":");
-        expect(Tok::Newline, "newline after select");
-        expect(Tok::Indent, "indented select arms");
+        expectPunct("{");
         for (;;) {
-            skipNewlines();
-            if (at(Tok::Dedent) || at(Tok::Eof)) break;
+            if (atPunct("}") || at(Tok::Eof)) break;
             expect(Tok::Ident, "'case'");               // consumes 'case'
             ast::Stmt::SelArm arm;
             if (cur().kind == Tok::Ident && atOp("=", 1)) {
@@ -573,7 +589,7 @@ ast::StmtP Parser::parseCompound() {
             endBlock();
             s->selArms.push_back(std::move(arm));
         }
-        if (!at(Tok::Eof)) expect(Tok::Dedent, "dedent after select arms");
+        endBlock();
         return s;
     }
 
@@ -594,6 +610,12 @@ ast::StmtP Parser::parseCompound() {
 // ---------------------------------------------------------------------------
 
 ast::StmtP Parser::parseSimple() {
+    auto s = parseSimpleStmt();
+    expectPunct(";");                                   // statements end with ';'
+    return s;
+}
+
+ast::StmtP Parser::parseSimpleStmt() {
     auto s = std::make_unique<ast::Stmt>();
     s->span = spanHere();
 
@@ -603,7 +625,7 @@ ast::StmtP Parser::parseSimple() {
         if (w == "return") {
             advance();
             s->kind = ast::StKind::Return;
-            if (!at(Tok::Newline) && !at(Tok::Eof)) {
+            if (!atPunct(";") && !at(Tok::Eof)) {
                 s->exprs.push_back(parseExpr());
                 while (atPunct(",")) { advance(); s->exprs.push_back(parseExpr()); }
             }
@@ -1017,20 +1039,24 @@ ast::ExprP Parser::parseExpr() {
 }
 
 ast::ExprP Parser::parseCondExpr() {
+    // Rust-style conditional expression:  if c { a } else { b }
     auto e = std::make_unique<ast::Expr>();
     e->kind = ast::ExKind::Cond;
     e->span = spanHere();
     advance();                                          // if
     e->cond = parseExpr();                              // condition
-    expectPunct(":");
+    expectPunct("{");
     e->lhs = parseExpr();                               // then-value
+    expectPunct("}");
     if (!atIdent("else")) {
-        diags_.report(cur().line, cur().col, "expected 'else:' in conditional expression");
+        diags_.report(cur().line, cur().col,
+                      "expected 'else { ... }' in conditional expression");
         throw Abort("condelse");
     }
     advance();
-    expectPunct(":");
+    expectPunct("{");
     e->rhs = parseExpr();                               // else-value
+    expectPunct("}");
     return e;
 }
 

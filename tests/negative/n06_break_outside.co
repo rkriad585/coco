@@ -1,2 +1,2 @@
-﻿# expect: 'break' outside of a loop
-break
+﻿; # expect: 'break' outside of a loop
+break;

@@ -1,30 +1,40 @@
 # 13 — Traits: static + dynamic dispatch  (plan §5.8)
-trait Drawable:
-    def draw(self)                       # signature-only (no default body)
-    def name(self) -> string:
-        return "drawable"                # default body, overridable
+trait Drawable {
+    def draw(self); # signature-only (no default body)
+    def name(self) -> string {
+        return "drawable"; # default body, overridable
 
-struct Circle:
-    r: f64
+}
+}
+struct Circle {
+    r: f64;
 
-    def draw(self):                      # inherent method on the struct itself
-        print(f"inherent draw r={self.r}")
+    def draw(self) { # inherent method on the struct itself
+        print(f"inherent draw r={self.r}");
 
-impl Drawable for Circle:                 # trait impl provides dispatch methods
-    def draw(self):
-        print(f"circle r={self.r}")
+}
+}
+impl Drawable for Circle { # trait impl provides dispatch methods
+    def draw(self) {
+        print(f"circle r={self.r}");
 
-    def name(self) -> string:
-        return "circle"
+}
+    def name(self) -> string {
+        return "circle";
 
-def render(d: Drawable):                  # DYNAMIC dispatch via trait object
-    d.draw()
-    print(d.name())
+}
+}
+def render(d: Drawable) { # DYNAMIC dispatch via trait object
+    d.draw();
+    print(d.name());
 
-def render_fast[T is Drawable](d: T):     # STATIC dispatch via monomorphization
-    d.draw()
+}
+def render_fast[T is Drawable](d: T) { # STATIC dispatch via monomorphization
+    d.draw();
 
-def main():
-    c = Circle(r: 2.5)
-    render(c)
-    render_fast(c)
+}
+def main() {
+    c = Circle(r: 2.5);
+    render(c);
+    render_fast(c);
+}

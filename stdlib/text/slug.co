@@ -5,31 +5,41 @@
 # Collapsing runs of separators and trimming leading/trailing hyphens
 # mirrors the behavior of the original builtin stub.
 
-pub def slugify(s: string) -> string:
-    out = ""
-    hyphen = false
-    for ch in s:
-        c = ord(ch)
-        if c >= 65 and c <= 90:          # 'A'..'Z' -> lowercase
-            c = c + 32
-        alnum = (c >= 97 and c <= 122) or (c >= 48 and c <= 57)
-        if alnum:
-            if hyphen and out != "":
-                out = out + "-"
-            out = out + chr(c)
-            hyphen = false
-        elif out != "":
-            hyphen = true
+pub def slugify(s: string) -> string {
+    out = "";
+    hyphen = false;
+    for ch in s {
+        c = ord(ch);
+        if c >= 65 and c <= 90 { # 'A'..'Z' -> lowercase
+            c = c + 32;
+}
+        alnum = (c >= 97 and c <= 122) or (c >= 48 and c <= 57);
+        if alnum {
+            if hyphen and out != "" {
+                out = out + "-";
+}
+            out = out + chr(c);
+            hyphen = false;
+        } elif out != "" {
+            hyphen = true;
     # trim trailing hyphens
-    while out != "" and out[len(out) - 1] == '-':
-        out = out[0:len(out) - 1]
-    return out
-pub def is_slug(s: string) -> bool:
-    if s == "":
-        return false
-    for ch in s:
-        c = ord(ch)
-        ok = (c >= 97 and c <= 122) or (c >= 48 and c <= 57) or ch == '-'
-        if not ok:
-            return false
-    return true
+}
+}
+    while out != "" and out[len(out) - 1] == '-' {
+        out = out[0:len(out) - 1];
+}
+    return out;
+}
+pub def is_slug(s: string) -> bool {
+    if s == "" {
+        return false;
+}
+    for ch in s {
+        c = ord(ch);
+        ok = (c >= 97 and c <= 122) or (c >= 48 and c <= 57) or ch == '-';
+        if not ok {
+            return false;
+}
+}
+    return true;
+}

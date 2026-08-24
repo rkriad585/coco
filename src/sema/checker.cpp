@@ -1157,8 +1157,10 @@ void Checker::checkPatternBindings(const ast::Pat& p, const TyP& subject) {
             bool known = false;
             if (subject && subject->is(TyK::Struct) && subject->name == "result" &&
                 (p.ctorName == "ok" || p.ctorName == "err")) {
-                payloads.emplace_back("value", argAt(subject, 0));
-                payloads.emplace_back("err", argAt(subject, 1));
+                if (p.ctorName == "ok")
+                    payloads.emplace_back("value", argAt(subject, 0));
+                else
+                    payloads.emplace_back("err", argAt(subject, 1));
                 known = true;
             } else {
                 Symbol* vs = scope_->find(p.ctorName);

@@ -1,29 +1,38 @@
 # 19 — Errors: result[T,E], raise, try, ?   (plan §8)
-struct ParseError:
-    bad: string
+struct ParseError {
+    bad: string;
 
-def parse_port(text: string) -> result[int, ParseError]:
-    port = text.to_int()
-    if port is none:
-        raise ParseError(bad: text)      # constructs Err + early return
-    return port                          # auto-wraps in Ok
+}
+def parse_port(text: string) -> result[int, ParseError] {
+    port = text.to_int();
+    if port is none {
+        raise ParseError(bad: text); # constructs Err + early return
+}
+    return port; # auto-wraps in Ok
 
-def read_config() -> result[int, ParseError]:
-    raw = "8080"                         # imagine io.read_file(...) here
-    port = try parse_port(raw)           # prefix form: propagate on error
-    doubled = parse_port(raw)?           # postfix form: identical semantics
-    print(doubled)
-    return port
+}
+def read_config() -> result[int, ParseError] {
+    raw = "8080"; # imagine io.read_file(...) here
+    port = try parse_port(raw); # prefix form: propagate on error
+    doubled = parse_port(raw)?; # postfix form: identical semantics
+    print(doubled);
+    return port;
 
-def main():
-    match read_config():
-        case ok(p):
-            print(f"port = {p}")
-        case err(e):
-            print(f"failed: {e.bad}")
+}
+def main() {
+    match read_config() {
+        case ok(p) {
+            print(f"port = {p}");
+}
+        case err(e) {
+            print(f"failed: {e.bad}");
 
     # errors are ordinary values — inspect without propagating:
-    r = parse_port("not-a-number")
-    if r.is_err():
-        e = r.unwrap_err()
-        print(f"rejected '{e.bad}'")
+}
+}
+    r = parse_port("not-a-number");
+    if r.is_err() {
+        e = r.unwrap_err();
+        print(f"rejected '{e.bad}'");
+}
+}

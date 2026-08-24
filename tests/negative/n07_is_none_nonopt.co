@@ -1,4 +1,5 @@
-﻿# expect: 'is none' expects an optional
-v = 5
-if v is none:
-    print(1)
+﻿; # expect: 'is none' expects an optional
+v = 5;
+if v is none {
+    print(1);
+}

@@ -1,17 +1,23 @@
 # 23 — select: multiplexing channel operations   (plan §7)
-def slow_producer(ch: chan[string]):
-    time.sleep(ms: 1000)
-    ch.send("late value")
+def slow_producer(ch: chan[string]) {
+    time.sleep(ms: 1000);
+    ch.send("late value");
 
-def main():
-    ch = chan[string]()
-    spawn slow_producer(ch)              # will be too late for the timeout
+}
+def main() {
+    ch = chan[string]();
+    spawn slow_producer(ch); # will be too late for the timeout
 
-    while true:
-        select:
-            case msg = ch.recv():        # arm with binding
-                print(f"got {msg}")
-                break
-            case <-time.after(ms: 500):  # receive-and-discard arm (timeout)
-                print("timed out waiting")
-                break
+    while true {
+        select {
+            case msg = ch.recv() { # arm with binding
+                print(f"got {msg}");
+                break;
+}
+            case <-time.after(ms: 500) { # receive-and-discard arm (timeout)
+                print("timed out waiting");
+                break;
+}
+}
+}
+}

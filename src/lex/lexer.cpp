@@ -119,18 +119,7 @@ void Lexer::consumeEol() {
     }
     ++line_;
     col_ = 1;
-    if (parenDepth_ == 0) {
-        atLineStart_ = true;
-        if (lineHasToken_) {
-            Token t;
-            t.kind = Tok::Newline;
-            t.text = "\n";
-            t.line = line_ - 1;
-            t.col = col_;
-            queue_.push_back(std::move(t));
-            lineHasToken_ = false;
-        }
-    }
+    atLineStart_ = true;    // C-style grammar: newlines are plain whitespace
 }
 
 void Lexer::skipToEol() {
@@ -141,42 +130,10 @@ void Lexer::skipToEol() {
 }
 
 void Lexer::processIndentation() {
-    uint32_t width = 0;
-    while (pos_ < src_.size() && (src_[pos_] == ' ' || src_[pos_] == '\t')) {
-        if (src_[pos_] == '\t')
-            diags_.report(line_, col_, "tabs are illegal for indentation (use 4 spaces)");
-        ++width;
+    // C-style grammar: {...} blocks + ';' terminators replaced the
+    // INDENT/DEDENT engine - leading whitespace is insignificant.
+    while (pos_ < src_.size() && (src_[pos_] == ' ' || src_[pos_] == '\t'))
         advanceWs();
-    }
-    if (pos_ >= src_.size()) return;
-
-    char c = src_[pos_];
-    if (atEol(pos_)) { consumeEol(); return; }          // blank line
-    if (c == '#') { skipToEol(); return; }              // comment-only line
-
-    if (width > indents_.back()) {
-        indents_.push_back(width);
-        Token t;
-        t.kind = Tok::Indent;
-        t.text = "<indent>";
-        t.line = line_;
-        t.col = 1;
-        queue_.push_back(std::move(t));
-    } else if (width < indents_.back()) {
-        while (indents_.back() > width) {
-            indents_.pop_back();
-            Token t;
-            t.kind = Tok::Dedent;
-            t.text = "<dedent>";
-            t.line = line_;
-            t.col = 1;
-            queue_.push_back(std::move(t));
-        }
-        if (indents_.back() != width) {
-            diags_.report(line_, col_, "unindent does not match any outer indentation level");
-            indents_.back() = width;
-        }
-    }
     atLineStart_ = false;
 }
 
@@ -184,24 +141,6 @@ void Lexer::finishFile() {
     if (parenDepth_ > 0)
         diags_.report(line_, col_, "unclosed '(' / '[' at end of file");
 
-    if (lineHasToken_) {
-        Token t;
-        t.kind = Tok::Newline;
-        t.text = "\n";
-        t.line = line_;
-        t.col = col_;
-        queue_.push_back(std::move(t));
-        lineHasToken_ = false;
-    }
-    while (indents_.back() != 0) {
-        indents_.pop_back();
-        Token t;
-        t.kind = Tok::Dedent;
-        t.text = "<dedent>";
-        t.line = line_;
-        t.col = 1;
-        queue_.push_back(std::move(t));
-    }
     Token t;
     t.kind = Tok::Eof;
     t.line = line_;

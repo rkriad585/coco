@@ -1,14 +1,16 @@
 # 08 — Comprehensions & lazy views        (plan §5.6 · grammar [PROVISIONAL] OQ#2)
-def main():
-    nums = [1, 2, 3, 4, 5]
+def main() {
+    nums = [1, 2, 3, 4, 5];
 
-    squares = [x * x for x in nums]                        # list comprehension
-    evens = [x for x in nums if x % 2 == 0]                # with filter clause
-    grid = [(x, y) for x in 0..3 for y in 0..3 if x < y]   # multiple clauses
+    squares = [x * x for x in nums]; # list comprehension
+    evens = [x for x in nums if x % 2 == 0]; # with filter clause
+    grid = [(x, y) for x in 0..3 for y in 0..3 if x < y]; # multiple clauses
 
-    lazy = for x in nums yield x * 10                      # generator view (lazy)
-    collected = []
-    for v in lazy:
-        collected.append(v)
+    lazy = for x in nums yield x * 10; # generator view (lazy)
+    collected = [];
+    for v in lazy {
+        collected.append(v);
 
-    print(squares, evens, grid, collected)
+}
+    print(squares, evens, grid, collected);
+}

@@ -1,17 +1,18 @@
 # 03 — Literals & checked casts           (plan §5.1, §5.4)
-def main():
-    big: i64 = 9_000_000_000             # digit separators
-    tiny: i8 = 127
-    mask: u32 = 0xFF_FF                  # hex literal
-    bits = 0b1010_1010                   # binary literal
-    mode = 0o755                         # octal literal
+def main() {
+    big: i64 = 9_000_000_000; # digit separators
+    tiny: i8 = 127;
+    mask: u32 = 0xFF_FF; # hex literal
+    bits = 0b1010_1010; # binary literal
+    mode = 0o755; # octal literal
 
-    ratio: f64 = 1e-9                    # exponent float
-    letter: char = 'A'
-    raw = r"C:\path\with\noescape"       # raw string: backslashes verbatim
-    blob = b"\x00\x01"                   # byte string
+    ratio: f64 = 1e-9; # exponent float
+    letter: char = 'A';
+    raw = r"C:\path\with\noescape"; # raw string: backslashes verbatim
+    blob = b"\x00\x01"; # byte string
 
-    wide = tiny as i64                   # widening cast, always safe
-    back = wide as i8                    # narrowing cast, CHECKED (traps on overflow in debug)
+    wide = tiny as i64; # widening cast, always safe
+    back = wide as i8; # narrowing cast, CHECKED (traps on overflow in debug)
 
-    print(big, tiny, mask, bits, mode, ratio, letter, raw, blob, wide, back)
+    print(big, tiny, mask, bits, mode, ratio, letter, raw, blob, wide, back);
+}

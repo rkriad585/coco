@@ -1,5 +1,7 @@
-﻿# expect: duplicate definition of 'f'
-def f() -> int:
-    return 1
-def f() -> int:
-    return 2
+﻿; # expect: duplicate definition of 'f'
+def f() -> int {
+    return 1;
+}
+def f() -> int {
+    return 2;
+}

@@ -1,4 +1,4 @@
-// coco — driver CLI for the Coco language.
+﻿// coco â€” driver CLI for the Coco language.
 //
 //   coco new <name>              scaffold an application project
 //   coco new lib <name>          scaffold a library package
@@ -104,7 +104,7 @@ struct Manifest {
     std::string docs = "docs/index.md";   // docs entry file ([package] docs)
     std::string author, repo, readme = "README.md", homepage;
     std::vector<std::string> authors, tags, keywords;
-    // [git] — files generated for new repos
+    // [git] â€” files generated for new repos
     bool gitignore = true, gitkeep = false;
     std::vector<std::string> gitIgnoreExtra;   // additional ignore patterns
     Deps deps;
@@ -241,7 +241,7 @@ void writeManifest(const fs::path& dir, const Manifest& m) {
 }
 
 // ---------------------------------------------------------------------------
-// lockfile: coco.lock — pins exactly what is installed where
+// lockfile: coco.lock â€” pins exactly what is installed where
 // ---------------------------------------------------------------------------
 
 struct LockEntry {
@@ -560,28 +560,30 @@ int cmdNew(const std::string& name, bool lib) {
                   "## 'pub def'. `coco doc " + name + "` turns them into a\n"
                   "## browsable API reference.\n\n"
                   "## Say hello to someone.\n"
-                  "pub def hello(who: string) -> string:\n"
-                  "    return \"hello from " + name + ", \" + who + \"!\"\n\n"
+                  "pub def hello(who: string) -> string {\n"
+                  "    return \"hello from " + name + ", \" + who + \"!\";\n}\n\n"
                   "## Shout it louder.\n"
-                  "pub def shout(who: string) -> string:\n"
-                  "    s = hello(who)\n"
-                  "    out = \"\"\n"
-                  "    for ch in s:\n"
-                  "        c = ord(ch)\n"
-                  "        if c >= 97 and c <= 122:\n"
-                  "            c = c - 32\n"
-                  "        out = out + chr(c)\n"
-                  "    return out\n");
+                  "pub def shout(who: string) -> string {\n"
+                  "    s = hello(who);\n"
+                  "    out = \"\";\n"
+                  "    for ch in s {\n"
+                  "        c = ord(ch);\n"
+                  "        if c >= 97 and c <= 122 {\n"
+                  "            c = c - 32;\n"
+                  "        }\n"
+                  "        out = out + chr(c);\n"
+                  "    }\n"
+                  "    return out;\n}\n");
 
         writeFile(root / "tests" / (name + "_test.co"),
                   "# tests live in tests/ and are named <file>_test.co\n"
                   "# run them all with:  coco test .\n\n"
-                  "import \"" + name + "\"\n\n"
-                  "def main():\n"
-                  "    assert_eq(greet_lib_probe(), 42)\n"
-                  "    print(\"all tests passed\")\n\n"
-                  "def greet_lib_probe() -> int:\n"
-                  "    return 6 * 7\n");
+                  "import \"" + name + "\";\n\n"
+                  "def main() {\n"
+                  "    assert_eq(greet_lib_probe(), 42);\n"
+                  "    print(\"all tests passed\");\n}\n\n"
+                  "def greet_lib_probe() -> int {\n"
+                  "    return 6 * 7;\n}\n");
 
         writeFile(root / "docs" / "index.md",
                   "# " + name + "\n\n" + m.description +
@@ -617,14 +619,14 @@ int cmdNew(const std::string& name, bool lib) {
 
         writeFile(root / "code" / "main.co",
                   "# " + name + " - a Coco application.\n\n"
-                  "def main():\n"
-                  "    print(\"hello from " + name + "\")\n");
+                  "def main() {\n"
+                  "    print(\"hello from " + name + "\");\n}\n");
 
         writeFile(root / "tests" / "main_test.co",
                   "# tests live in tests/ and are named <file>_test.co\n\n"
-                  "def main():\n"
-                  "    assert_eq(2 + 2, 4)\n"
-                  "    print(\"all tests passed\")\n");
+                  "def main() {\n"
+                  "    assert_eq(2 + 2, 4);\n"
+                  "    print(\"all tests passed\");\n}\n");
 
         writeFile(root / "docs" / "index.md",
                   "# " + name + "\n\n" + m.description + ".\n\n## Run\n\n```"
@@ -969,7 +971,7 @@ int cmdInstall(const std::string& raw, bool global_) {
     return installOne(ref, raw, global_, /*record=*/true);
 }
 
-// `coco add` — npm-install / go-mod-tidy style sync.
+// `coco add` â€” npm-install / go-mod-tidy style sync.
 //   coco add <pkg>...   resolve + install + record each dependency
 //   coco add            (no args) tidy: install every manifest dep that is
 //                       missing from coco_libs/libs
@@ -1142,7 +1144,7 @@ int cmdList() {
 }
 
 // ---------------------------------------------------------------------------
-// coco clone — clone any git repo (shorthand-aware)
+// coco clone â€” clone any git repo (shorthand-aware)
 //   coco clone user/repo            -> github.com/user/repo
 //   coco clone github.com/u/r       full host forms work too
 //   coco clone https://host/u/r
@@ -1199,7 +1201,7 @@ int cmdClone(const std::string& spec, bool full) {
 }
 
 // ---------------------------------------------------------------------------
-// coco list online — browse the coco-libs registry
+// coco list online â€” browse the coco-libs registry
 // ---------------------------------------------------------------------------
 
 int cmdListOnline() {
@@ -1426,7 +1428,7 @@ bool regenerateDocs(const Manifest& m) {
 }
 
 // ---------------------------------------------------------------------------
-// coco doc — markdown viewer over HTTP
+// coco doc â€” markdown viewer over HTTP
 // ---------------------------------------------------------------------------
 
 std::string mdEscape(const std::string& s) {
@@ -1680,7 +1682,7 @@ int cmdDoc(const std::string& target, int port) {
 }
 
 // ---------------------------------------------------------------------------
-// coco build — app: standalone .exe (sources embedded, interpreter linked)
+// coco build â€” app: standalone .exe (sources embedded, interpreter linked)
 //              lib: type-check all sources + pack distributable .cocolib
 // ---------------------------------------------------------------------------
 
@@ -1774,8 +1776,10 @@ struct BuildOpts {
     bool sasm = false;       // -S  human-readable assembly listing (.sasm)
     bool obj = false;        // -O  native object file (.obj + .lib via lib.exe)
     bool bytecode = false;   // -B  portable bytecode bundle (.cob)
+    bool singleFile = false; // `coco build file.co` (Go-style, no manifest)
     std::string target;      // --target=<os>-<arch>; empty -> $COCO_TARGET -> host
     std::string outPath;     // -o <path> (Go build -o)
+    std::string defaultOut;  // single-file: extensionless default in CWD
 };
 
 std::string hostTarget() {
@@ -1875,8 +1879,9 @@ std::vector<std::string> collectRuntimeSources(const std::string& srcRoot) {
 
 // resolve module sources transitively from the entry file
 bool gatherEmbedded(const std::string& entry, const std::string& mainSrc,
-                    std::map<std::string, std::string>& embedded) {
-    std::vector<std::string> dirs;
+                    std::map<std::string, std::string>& embedded,
+                    const std::vector<std::string>& extraDirs = {}) {
+    std::vector<std::string> dirs = extraDirs;
     dirs.push_back("code");                 // sibling modules of the entry
     dirs.push_back("coco_libs/libs");
     dirs.push_back("coco_libs");
@@ -2270,68 +2275,59 @@ std::string emitCob(const std::string& mainSrc,
     return o;
 }
 
-int buildApp(const Manifest& m, const BuildOpts& opts) {
+// Core build pipeline shared by project mode (coco.toml) and single-file
+// mode (`coco build main.co`): type-check, then emit sasm / bytecode bundle
+// / self-contained launcher and compile it with the best available pipeline.
+int buildProgram(const std::string& name, const std::string& version,
+                 const std::string& entry, const std::string& mainSrc,
+                 const std::map<std::string, std::string>& embedded,
+                 BuildOpts& opts) {
     const std::string profile = opts.release ? "release" : "debug";
     const fs::path outDir = fs::path("build") / profile / opts.target;
     std::error_code ec;
     fs::create_directories(outDir, ec);
 
-    std::string entry = m.main.empty() ? "code/main.co" : m.main;
-    std::string mainSrc;
-    if (!readFile(entry, mainSrc)) {
-        std::cerr << "coco build: entry '" << entry << "' not found\n";
-        return 1;
-    }
-
-    // parse once (shared by checks and -S)
-    std::vector<coco::ast::StmtP> parsed;
-    {
-        coco::DiagEngine diags;
-        frontEnd(entry, mainSrc, diags);
-        if (diags.count()) {
-            printDiags(entry, diags);
-            return 65;
-        }
-        auto toks = coco::Lexer(mainSrc, entry, diags).lexAll();
-        if (!diags.count())
-            parsed = coco::Parser(toks, diags).parseProgram();
-        if (diags.count()) {
-            printDiags(entry, diags);
-            return 65;
-        }
-    }
+    // Go-style decision point: a GNU toolchain produces a real native static
+    // binary for the target; without one we fall back to portable bytecode
+    // (non-host) or the prebuilt-MSVC-lib pipeline (host).
+    const bool isHost = opts.target == hostTarget();
+    const TargetInfo* ti = findTarget(opts.target);
+    std::string crossCxx = ti ? resolveCrossCxx(ti) : "";
+    // -O objects need the MSVC host toolchain; keep that path reachable.
+    if (!isHost && opts.obj) crossCxx = "";
 
     if (opts.sasm) {
+        std::vector<coco::ast::StmtP> parsed;
+        {
+            coco::DiagEngine diags;
+            frontEnd(entry, mainSrc, diags);
+            if (diags.count()) {
+                printDiags(entry, diags);
+                return 65;
+            }
+            auto toks = coco::Lexer(mainSrc, entry, diags).lexAll();
+            if (!diags.count())
+                parsed = coco::Parser(toks, diags).parseProgram();
+            if (diags.count()) {
+                printDiags(entry, diags);
+                return 65;
+            }
+        }
         const std::string out =
-            (outDir / (m.name + ".sasm")).generic_string();
+            opts.outPath.empty()
+                ? (outDir / (name + ".sasm")).generic_string()
+                : opts.outPath;
         writeFile(out, emitSasm(entry, parsed));
         std::cout << "wrote assembly listing " << out << "\n";
         return 0;
     }
 
-    std::map<std::string, std::string> embedded;
-    gatherEmbedded(entry, mainSrc, embedded);
-
-    // Go-style decision point: a cross toolchain produces a real native
-    // binary for the target; without one we fall back to portable bytecode.
-    // An explicit COCO_CXX* override forces the GNU path even for the host
-    // triple (mirrors setting CC on a native Go build).
-    const bool isHost = opts.target == hostTarget();
-    const TargetInfo* ti = findTarget(opts.target);
-    std::string forced;
-    {
-        std::string envName = "COCO_CXX_";
-        for (char p : opts.target)
-            envName += (p == '-') ? '_' : (char)toupper((unsigned char)p);
-        if (std::getenv(envName.c_str()) || std::getenv("COCO_CXX"))
-            forced = "1";
-    }
-    std::string crossCxx =
-        ti && (!isHost || !forced.empty()) ? resolveCrossCxx(ti) : "";
-
     if (opts.bytecode || (!isHost && crossCxx.empty())) {
+        const std::string base = opts.outPath.empty() ? (outDir / name).generic_string() : opts.outPath;
         const std::string out =
-            (outDir / (m.name + ".cob")).generic_string();
+            opts.outPath.empty() && !opts.defaultOut.empty()
+                ? opts.defaultOut + ".cob"
+                : base + ".cob";
         writeFile(out, emitCob(mainSrc, embedded));
         if (opts.bytecode && isHost)
             std::cout << "wrote bytecode bundle " << out << " ("
@@ -2351,9 +2347,9 @@ int buildApp(const Manifest& m, const BuildOpts& opts) {
     // emit launcher .cpp embedding every reachable source
     std::ostringstream o;
     o << "// generated by coco build - standalone Coco program\n";
-    o << "#define COCO_APP_NAME " << coco::tomlmini::quote(m.name) << "\n"
+    o << "#define COCO_APP_NAME " << coco::tomlmini::quote(name) << "\n"
       << "#define COCO_APP_VERSION "
-      << coco::tomlmini::quote(m.version.empty() ? "0.0.0" : m.version) << "\n"
+      << coco::tomlmini::quote(version.empty() ? "0.0.0" : version) << "\n"
       << "#define COCO_APP_TARGET " << coco::tomlmini::quote(opts.target)
       << "\n\n";
     o << "#include \"interp/runtime.h\"\n"
@@ -2412,15 +2408,14 @@ int buildApp(const Manifest& m, const BuildOpts& opts) {
       << "    }\n"
       << "}\n";
 
-    writeFile((outDir / (m.name + ".cpp")).generic_string(), o.str());
+    writeFile((outDir / (name + ".cpp")).generic_string(), o.str());
 
     // ---- Go-style cross build: one self-contained static binary ----------
     // Compiles the generated launcher TOGETHER WITH the whole Coco runtime
     // (src/**/*.cpp) using the target's C++ toolchain - the analogue of
     // CGO_ENABLED=0: no prebuilt host libs, nothing external.
-    // crossCxx is non-empty exactly when we want the GNU pipeline:
-    // non-host target with a found/overridden toolchain, or an explicit
-    // COCO_CXX* override even on the host triple.
+    // crossCxx is non-empty exactly when we want the GNU pipeline: any
+    // target whose toolchain resolves (env override or PATH probe).
     if (!crossCxx.empty()) {
         char xbuf[MAX_PATH * 2];
         GetModuleFileNameA(nullptr, xbuf, sizeof xbuf);
@@ -2435,10 +2430,13 @@ int buildApp(const Manifest& m, const BuildOpts& opts) {
             return 1;
         }
         const std::string outName =
-            opts.outPath.empty()
-                ? (outDir / (m.name + (ti ? ti->exeExt : ".exe")))
-                      .generic_string()
-                : opts.outPath;
+            !opts.outPath.empty()
+                ? opts.outPath
+                : !opts.defaultOut.empty()
+                    ? opts.defaultOut +
+                          (ti && ti->isWindows ? ".exe" : "")
+                    : (outDir / (name + (ti ? ti->exeExt : ".exe")))
+                          .generic_string();
         {
             fs::path op(outName);
             if (op.has_parent_path()) fs::create_directories(op.parent_path());
@@ -2447,7 +2445,7 @@ int buildApp(const Manifest& m, const BuildOpts& opts) {
         // response file keeps the command line short
         const std::string rsp = (outDir / "cross.rsp").generic_string();
         const std::string launcherCpp =
-            (outDir / (m.name + ".cpp")).generic_string();
+            (outDir / (name + ".cpp")).generic_string();
         {
             std::ostringstream r;
             r << "-std=c++20 -D_CRT_SECURE_NO_WARNINGS ";
@@ -2461,7 +2459,7 @@ int buildApp(const Manifest& m, const BuildOpts& opts) {
             if (ti && ti->isWindows) r << " -lws2_32";
             writeFile(rsp, r.str());
         }
-        std::cout << "cross-compiling with " << crossCxx << " -> "
+        std::cout << "compiling with " << crossCxx << " -> "
                   << outName << " (" << srcs.size() + 1
                   << " translation units)\n";
         std::string cmd =
@@ -2490,12 +2488,14 @@ int buildApp(const Manifest& m, const BuildOpts& opts) {
     size_t ds = exePath.find_last_of("/\\");
     std::string binRoot = ds == std::string::npos ? "." : exePath.substr(0, ds);
 
-    // NOTE: must not start with '"' — cmd /c strips leading quotes.
+    // NOTE: must not start with '"' â€” cmd /c strips leading quotes.
     // NOTE: no quoted paths ending in '\' (argv would eat the quote).
-    const std::string genCpp = (outDir / (m.name + ".cpp")).generic_string();
+    const std::string genCpp = (outDir / (name + ".cpp")).generic_string();
     const std::string outBase =
-        opts.outPath.empty() ? (outDir / m.name).generic_string()
-                             : opts.outPath;
+        !opts.outPath.empty()
+            ? opts.outPath
+            : !opts.defaultOut.empty() ? opts.defaultOut + ".exe"
+                                       : (outDir / name).generic_string();
     if (opts.obj) {
         // -O: object file (+ static .lib via lib.exe); host toolchain only
         if (opts.target != hostTarget()) {
@@ -2612,8 +2612,23 @@ int packLib(const Manifest& m, const BuildOpts& opts) {
     return 0;
 }
 
+int buildAppShim(const Manifest& m, BuildOpts& opts) {
+    std::string entry = m.main.empty() ? "code/main.co" : m.main;
+    std::string mainSrc;
+    if (!readFile(entry, mainSrc)) {
+        std::cerr << "coco build: entry '" << entry << "' not found\n";
+        return 1;
+    }
+    std::map<std::string, std::string> embedded;
+    gatherEmbedded(entry, mainSrc, embedded);
+    return buildProgram(m.name,
+                        m.version.empty() ? "0.1.0" : m.version, entry,
+                        mainSrc, embedded, opts);
+}
+
 int cmdBuild(const std::vector<std::string>& args, size_t from) {
     BuildOpts opts;
+    std::string positional;
     for (size_t i = from; i < args.size(); ++i) {
         const std::string& a = args[i];
         if (a == "lib") opts.wantLib = true;
@@ -2631,6 +2646,8 @@ int cmdBuild(const std::vector<std::string>& args, size_t from) {
             opts.outPath = args[++i];
         else if (a.rfind("--output=", 0) == 0)
             opts.outPath = a.substr(9);
+        else if (a.size() && a[0] != '-' && positional.empty())
+            positional = a;                     // file.co | . | <dir>
         else {
             std::cerr << "coco build: unknown option '" << a << "'\n";
             return 64;
@@ -2645,9 +2662,41 @@ int cmdBuild(const std::vector<std::string>& args, size_t from) {
                   << "run 'coco targets' for the supported matrix\n";
         return 64;
     }
+
+    // ---- Go-style single-file mode: coco build path/to/prog.co ----------
+    // No manifest needed; the binary defaults to ./<stem>.exe in the CWD.
+    if (!positional.empty() &&
+        positional.rfind(".co") == positional.size() - 3) {
+        fs::path p(positional);
+        if (!fs::is_regular_file(p)) {
+            std::cerr << "coco build: file not found: " << positional << "\n";
+            return 1;
+        }
+        p = fs::absolute(p).lexically_normal();
+        std::string mainSrc;
+        if (!readFile(p.generic_string(), mainSrc)) {
+            std::cerr << "coco build: cannot read '" << positional << "'\n";
+            return 1;
+        }
+        opts.singleFile = true;
+        if (opts.outPath.empty())
+            opts.defaultOut = p.stem().string();    // ./<stem>[.exe]
+        std::map<std::string, std::string> embedded;
+        gatherEmbedded(p.generic_string(), mainSrc, embedded,
+                       {p.parent_path().generic_string()});
+        return buildProgram(p.stem().string(), "0.0.0",
+                            p.generic_string(), mainSrc, embedded, opts);
+    }
+    if (!positional.empty() && positional != ".") {
+        std::cerr << "coco build: '" << positional
+                  << "' is neither a .co file nor a project directory\n";
+        return 64;
+    }
+
     Manifest m = readManifest(".");
     if (m.name.empty()) {
-        std::cerr << "coco build: no coco.toml in this directory\n";
+        std::cerr << "coco build: no coco.toml in this directory\n"
+                  << "(or compile a single file: coco build main.co)\n";
         return 1;
     }
     if (opts.wantLib || m.type == "lib") {
@@ -2657,7 +2706,7 @@ int cmdBuild(const std::vector<std::string>& args, size_t from) {
         }
         return packLib(m, opts);
     }
-    return buildApp(m, opts);
+    return buildAppShim(m, opts);
 }
 
 int unpackCocolib(const std::string& raw, bool global_) {
@@ -2726,9 +2775,13 @@ int cmdTargets() {
         std::cout << t << std::string(20 - t.size(), ' ')
                   << (ti.isWindows ? "<name>.exe" : "<name>")
                   << std::string(7, ' ');
-        if (t == host)
-            std::cout << "(host - prebuilt MSVC libs)\n";
-        else {
+        if (t == host) {
+            std::string cxx = resolveCrossCxx(&ti);
+            if (!cxx.empty())
+                std::cout << cxx << "\n";
+            else
+                std::cout << "(host - prebuilt MSVC libs)\n";
+        } else {
             std::string cxx = resolveCrossCxx(&ti);
             if (!cxx.empty())
                 std::cout << cxx << "\n";
@@ -2768,7 +2821,11 @@ void usage() {
         << "  coco remove <name>               uninstall a dependency\n"
         << "  coco clone <repo> [--full]       clone any repo (shorthand:"
                " user/repo)\n"
-        << "  coco build [--release|--debug]   compile project\n"
+        << "  coco build                       compile project (needs "
+               "coco.toml)\n"
+        << "  coco build <file.co>             compile one file -> ./<stem>"
+               ".exe\n"
+        << "           [--release|--debug]     optimization profile\n"
         << "           [--target=<os>-<arch>]    like GOOS/GOARCH; default "
                "$COCO_TARGET or host\n"
         << "           [-S|-O|-B]                -S asm listing, -O .obj+."

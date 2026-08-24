@@ -1,20 +1,22 @@
 # 27 — Value semantics: assignment copies (plan §6.1)
-struct Sensor:
-    id: int
-    var reading: f64                     # mutable field
+struct Sensor {
+    id: int;
+    var reading: f64; # mutable field
 
-def main():
-    s1 = Sensor(id: 1, reading: 20.5)
-    s2 = s1                              # FULL COPY — bytes duplicated, no aliasing
+}
+def main() {
+    s1 = Sensor(id: 1, reading: 20.5);
+    s2 = s1; # FULL COPY — bytes duplicated, no aliasing
 
-    s2.reading = 99.0                    # mutates the copy only
-    print(s1.reading, s2.reading)        # 20.5 99.0
+    s2.reading = 99.0; # mutates the copy only
+    print(s1.reading, s2.reading); # 20.5 99.0
 
-    sensors = [s1, s2]                   # array of values stored INLINE, contiguous
-    print(sensors[0].id)
+    sensors = [s1, s2]; # array of values stored INLINE, contiguous
+    print(sensors[0].id);
 
     # Heap appears only when you ask for it:
-    shared = new Sensor(id: 3, reading: 0.0)   # refcounted heap object
-    alias = shared                       # copies the HANDLE, not the object
-    alias.reading = 42.0
-    print(shared.reading)                # 42.0 — same underlying object
+    shared = new Sensor(id: 3, reading: 0.0); # refcounted heap object
+    alias = shared; # copies the HANDLE, not the object
+    alias.reading = 42.0;
+    print(shared.reading); # 42.0 — same underlying object
+}

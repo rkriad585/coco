@@ -1,21 +1,30 @@
 # 12 — Enums & exhaustive matching        (plan §5.8)
-enum Status:
-    Idle
-    Running(pid: int)
-    Failed(code: int, msg: string)
+enum Status {
+    Idle,
+    Running(pid: int),
+    Failed(code: int, msg: string),
 
-def render(s: Status) -> string:         # compiler ENFORCES all variants covered
-    match s:
-        case Idle:
-            return "idle"
-        case Running(pid):
-            return f"running pid={pid}"
-        case Failed(code: 500, msg):     # named-field variant pattern
-            return f"server error: {msg}"
-        case Failed(code, msg):
-            return f"error {code}: {msg}"
+}
+def render(s: Status) -> string { # compiler ENFORCES all variants covered
+    match s {
+        case Idle {
+            return "idle";
+}
+        case Running(pid) {
+            return f"running pid={pid}";
+}
+        case Failed(code: 500, msg) { # named-field variant pattern
+            return f"server error: {msg}";
+}
+        case Failed(code, msg) {
+            return f"error {code}: {msg}";
 
-def main():
-    states = [Status.Idle, Status.Running(pid: 42), Status.Failed(code: 404, msg: "not found")]
-    for s in states:
-        print(render(s))
+}
+}
+}
+def main() {
+    states = [Status.Idle, Status.Running(pid: 42), Status.Failed(code: 404, msg: "not found")];
+    for s in states {
+        print(render(s));
+}
+}

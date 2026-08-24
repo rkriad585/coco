@@ -45,15 +45,16 @@ private:
     ast::StmtP parseTraitDef();
     ast::StmtP parseImplDef();
     ast::StmtP parseImport(bool from, bool exportKw);
-    ast::StmtP parseSimple();
+    ast::StmtP parseSimple();                       // parseSimpleStmt + ';'
+    ast::StmtP parseSimpleStmt();
     ast::StmtP parseCompound();
 
     std::vector<ast::Param> parseParamList();     // inside ()
     std::vector<std::pair<std::string, ast::TypeP>> parseTypeParams();
-    std::vector<ast::StmtP> parseBlock();          // ':' NEWLINE INDENT .. DEDENT
-    void endBlock();                               // consume the block's DEDENT
+    std::vector<ast::StmtP> parseBlock();          // '{' .. '}'
+    void endBlock();                               // consume the block's '}'
     ast::StmtP finishConstDecl();
-    ast::StmtP parseIfChain();                     // if/elif/else (nested tails)
+    ast::StmtP parseIfChain();                     // if / else if / elif / else
     std::vector<ast::Variant> parseVariants();
 
     // ---- patterns ----

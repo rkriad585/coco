@@ -1,24 +1,31 @@
 # 22 — Concurrency: spawn, channels, join   (plan §7)
-def worker(id: int, jobs: chan[int], done: chan[string]):
-    for j in jobs:                       # recv loop until channel closes
-        done.send(f"worker {id} finished job {j}")
+def worker(id: int, jobs: chan[int], done: chan[string]) {
+    for j in jobs { # recv loop until channel closes
+        done.send(f"worker {id} finished job {j}");
 
-def main():
-    jobs = chan[int](cap: 8)             # buffered channel
-    done = chan[string]()                # unbuffered
+}
+}
+def main() {
+    jobs = chan[int](cap: 8); # buffered channel
+    done = chan[string](); # unbuffered
 
-    handles = []
-    for i in 1..=3:
-        h = spawn worker(i, jobs, done)  # lightweight green thread
-        handles.append(h)
+    handles = [];
+    for i in 1..=3 {
+        h = spawn worker(i, jobs, done); # lightweight green thread
+        handles.append(h);
 
-    for j in 1..=5:
-        jobs.send(j)
-    jobs.close()                         # signals end-of-stream to receivers
+}
+    for j in 1..=5 {
+        jobs.send(j);
+}
+    jobs.close(); # signals end-of-stream to receivers
 
-    for _ in 1..=5:
-        print(done.recv())               # blocking receive
+    for _ in 1..=5 {
+        print(done.recv()); # blocking receive
 
-    for h in handles:
-        h.join()                         # wait for thread exit
-    print("all workers joined")
+}
+    for h in handles {
+        h.join(); # wait for thread exit
+}
+    print("all workers joined");
+}
