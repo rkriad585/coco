@@ -124,6 +124,15 @@ std::vector<ast::StmtP> Parser::parseProgram() {
 }
 
 ast::StmtP Parser::parseTopOrStmt() {
+    // labeled loop:  label: while ...  |  label: for ...
+    if (cur().kind == Tok::Ident && atPunct(":", 1) &&
+        (atIdent("while", 2) || atIdent("for", 2))) {
+        std::string lbl = advance().text;
+        advance();                                      // ':'
+        auto s = parseCompound();
+        s->label = lbl;
+        return s;
+    }
     if (atIdent("def")) return parseFuncDef(false);
 
     if (atIdent("pub")) {
@@ -637,8 +646,18 @@ ast::StmtP Parser::parseSimpleStmt() {
             s->exprs.push_back(parseExpr());
             return s;
         }
-        if (w == "break")    { advance(); s->kind = ast::StKind::Break; return s; }
-        if (w == "continue") { advance(); s->kind = ast::StKind::Continue; return s; }
+        if (w == "break") {
+            advance();
+            s->kind = ast::StKind::Break;
+            if (cur().kind == Tok::Ident) s->label = advance().text;
+            return s;
+        }
+        if (w == "continue") {
+            advance();
+            s->kind = ast::StKind::Continue;
+            if (cur().kind == Tok::Ident) s->label = advance().text;
+            return s;
+        }
         if (w == "defer") {
             advance();
             s->kind = ast::StKind::Defer;
@@ -711,7 +730,20 @@ ast::StmtP Parser::parseSimpleStmt() {
 // patterns
 // ---------------------------------------------------------------------------
 
-ast::PatP Parser::parsePattern() { return parseCtorOrBind(); }
+static ast::PatP mkPat(ast::PatKind k, ast::Span s);
+
+ast::PatP Parser::parsePattern() {
+    // or-pattern: p1 | p2 | ...   (lowest precedence in patterns)
+    auto first = parseCtorOrBind();
+    if (!atOp("|")) return first;
+    auto orp = mkPat(ast::PatKind::Or, first->span);
+    orp->alts.push_back(std::move(first));
+    while (atOp("|")) {
+        advance();
+        orp->alts.push_back(parseCtorOrBind());
+    }
+    return orp;
+}
 
 static ast::PatP mkPat(ast::PatKind k, ast::Span s) {
     auto p = std::make_unique<ast::Pat>();
@@ -752,12 +784,51 @@ ast::PatP Parser::parseCtorOrBind() {
         return mkPat(ast::PatKind::Wild, sp);
     }
 
+    // slice / list pattern:  [p1, p2, ..rest]  |  [p1, p2]
+    if (atPunct("[")) {
+        advance();
+        auto sl = mkPat(ast::PatKind::Slice, sp);
+        while (!atPunct("]")) {
+            if (atPunct(",")) { advance(); continue; }
+            // rest: `..` [name]
+            if (atOp("..")) {
+                advance();
+                if (cur().kind == Tok::Ident && cur().text != "_")
+                    sl->restName = advance().text;
+                break;                                  // rest captures tail
+            }
+            sl->elems.push_back(parsePattern());
+            if (atPunct(",")) advance();
+            else break;
+        }
+        expectPunct("]");
+        return sl;
+    }
+
     // group / tuple pattern
     if (atPunct("(")) {
         advance();
         if (atPunct(")")) {                             // () unit
             advance();
             return mkPat(ast::PatKind::Tuple, sp);
+        }
+        // rest-only or leading rest: (..) | (..tail, ...)
+        if (atOp("..")) {
+            advance();
+            auto tup = mkPat(ast::PatKind::Tuple, sp);
+            if (cur().kind == Tok::Ident && cur().text != "_")
+                tup->restName = advance().text;
+            if (!atPunct(")")) {
+                while (atPunct(",")) {
+                    advance();
+                    if (atPunct(")")) break;
+                    tup->elems.push_back(parsePattern());
+                    if (atPunct(",")) advance();
+                    else break;
+                }
+            }
+            expectPunct(")");
+            return tup;
         }
         auto first = parsePattern();
         if (atPunct(",")) {
@@ -766,6 +837,12 @@ ast::PatP Parser::parseCtorOrBind() {
             while (atPunct(",")) {
                 advance();
                 if (atPunct(")")) break;
+                if (atOp("..")) {                       // rest in tuple
+                    advance();
+                    if (cur().kind == Tok::Ident && cur().text != "_")
+                        tup->restName = advance().text;
+                    break;
+                }
                 tup->elems.push_back(parsePattern());
             }
             expectPunct(")");
@@ -847,11 +924,19 @@ ast::PatP Parser::parseCtorOrBind() {
         return p;
     }
 
-    // binding [var] name [is type]
+    // binding [var] name [is type]  |  sub-pat @ name (Rust-style alias)
     auto p = mkPat(ast::PatKind::Bind, sp);
     if (atIdent("var") && cur(1).kind == Tok::Ident) advance();
     p->bindName = expect(Tok::Ident, "binding name").text;
     if (atIdent("is")) { advance(); p->bindType = parseType(); }
+    if (atOp("@")) {                                   // name @ sub-pattern
+        advance();
+        auto alias = mkPat(ast::PatKind::BindAlias, sp);
+        alias->bindName = p->bindName;
+        alias->bindType = std::move(p->bindType);
+        alias->aliasSub = parsePattern();
+        return alias;
+    }
     return p;
 }
 

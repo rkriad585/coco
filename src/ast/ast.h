@@ -47,7 +47,7 @@ struct Type {
 // ---- Patterns ---------------------------------------------------------------
 
 enum class PatKind {
-    Wild, Literal, Range, Tuple, Ctor, Bind,
+    Wild, Literal, Range, Tuple, Ctor, Bind, BindAlias, Or, Slice, Rest,
 };
 
 struct PatField {                     // Ctor field: named `x: pat` or positional
@@ -67,6 +67,9 @@ struct Pat {
     std::vector<PatField> fields;     // Ctor
     std::string bindName;             // Bind
     TypeP bindType;                   // Bind: `x is T`
+    PatP aliasSub;                    // BindAlias: `pat @ name` (Rust `x @ pat`)
+    std::vector<PatP> alts;           // Or: `p1 | p2 | ...`
+    std::string restName;             // Slice: `..rest` tail capture (""=none)
 };
 
 // ---- Expressions -------------------------------------------------------------
@@ -212,6 +215,9 @@ struct Stmt {
     std::vector<ExprP> exprs;         // Assign targets+values flattened:
                                       // [t1..tn, v1..vm]
     std::string augOp;
+
+    // Labeled control flow
+    std::string label;                // loop labels + break/continue targets
 
     // If / While / For / Match / Select
     std::vector<StmtP> elseBody;      // If else-chain tail (flat elifs below)

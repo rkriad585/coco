@@ -1044,8 +1044,8 @@ void Interpreter::exec(const Stmt& s, Env env) {
             throw SignalRaise{Value::resultErr(std::move(err))};
         }
 
-        case ast::StKind::Break:    throw SignalBreak{};
-        case ast::StKind::Continue: throw SignalContinue{};
+        case ast::StKind::Break:    throw SignalBreak{s.label};
+        case ast::StKind::Continue: throw SignalContinue{s.label};
 
         case ast::StKind::Defer: {
             Deferred d = prepareDeferred(*s.exprs[0], env);
@@ -1079,9 +1079,11 @@ void Interpreter::exec(const Stmt& s, Env env) {
             while (truthy(eval(*s.exprs[0], env))) {
                 try {
                     execBlock(s.body, env);
-                } catch (const SignalBreak&) {
+                } catch (const SignalBreak& b) {
+                    if (!b.label.empty() && b.label != s.label) throw;
                     break;
-                } catch (const SignalContinue&) {
+                } catch (const SignalContinue& c) {
+                    if (!c.label.empty() && c.label != s.label) throw;
                     continue;
                 }
             }
@@ -1096,9 +1098,13 @@ void Interpreter::exec(const Stmt& s, Env env) {
                            try {
                                execBlock(s.body, child);
                                return true;
-                           } catch (const SignalBreak&) {
+                           } catch (const SignalBreak& b) {
+                               if (!b.label.empty() && b.label != s.label)
+                                   throw;
                                return false;
-                           } catch (const SignalContinue&) {
+                           } catch (const SignalContinue& c) {
+                               if (!c.label.empty() && c.label != s.label)
+                                   throw;
                                return true;
                            }
                        },
@@ -2928,11 +2934,21 @@ bool Interpreter::matchPat(const ast::Pat& p, const Value& v, Env env) {
         }
 
         case ast::PatKind::Tuple: {
-            if ((v.k != VK::Tuple && v.k != VK::List) ||
-                v.vec->size() != p.elems.size())
+            if (v.k != VK::Tuple && v.k != VK::List) return false;
+            if (p.restName.empty() && v.vec->size() != p.elems.size())
+                return false;
+            if (!p.restName.empty() && v.vec->size() < p.elems.size())
                 return false;
             for (size_t i = 0; i < p.elems.size(); ++i)
                 if (!matchPat(*p.elems[i], (*v.vec)[i], env)) return false;
+            if (!p.restName.empty() && p.restName != "_") {
+                Value rest = v.k == VK::List
+                                 ? Value::list({v.vec->begin() + (int)p.elems.size(),
+                                                v.vec->end()})
+                                 : Value::tuple({v.vec->begin() + (int)p.elems.size(),
+                                                 v.vec->end()});
+                env->vars[p.restName] = rest;
+            }
             bindPat(p, v, env);
             return true;
         }
@@ -3007,6 +3023,47 @@ bool Interpreter::matchPat(const ast::Pat& p, const Value& v, Env env) {
             return true;
         }
 
+        case ast::PatKind::Slice: {
+            // [p1, p2, ..rest] matches a list/tuple with at least the
+            // front elements; the rest (if named) binds the remaining items.
+            if (v.k != VK::List && v.k != VK::Tuple) return false;
+            const auto& items = *v.vec;
+            if (p.restName.empty() && items.size() != p.elems.size())
+                return false;
+            if (!p.restName.empty() && items.size() < p.elems.size())
+                return false;
+            for (size_t i = 0; i < p.elems.size(); ++i)
+                if (!matchPat(*p.elems[i], items[i], env)) return false;
+            if (!p.restName.empty() && p.restName != "_") {
+                Value rest = v.k == VK::List
+                                 ? Value::list({items.begin() + (int)p.elems.size(),
+                                                items.end()})
+                                 : Value::tuple({items.begin() + (int)p.elems.size(),
+                                                 items.end()});
+                env->vars[p.restName] = rest;
+            }
+            return true;
+        }
+
+        case ast::PatKind::Rest:
+            return true;
+
+        case ast::PatKind::Or: {
+            // p1 | p2 | ...: try each alternative; first match wins.
+            for (const auto& alt : p.alts) {
+                if (matchPat(*alt, v, env)) return true;
+            }
+            return false;
+        }
+
+        case ast::PatKind::BindAlias: {
+            // pat @ name: the sub-pattern must match; then bind the whole
+            // subject to the alias name.
+            if (!p.aliasSub || !matchPat(*p.aliasSub, v, env)) return false;
+            env->vars[p.bindName] = v;
+            return true;
+        }
+
         case ast::PatKind::Bind: {
             if (p.bindType && !typeTestMatches(v, p.bindType->name))
                 return false;
@@ -3038,10 +3095,46 @@ void Interpreter::bindPat(const ast::Pat& p, const Value& v, Env env) {
             if (p.bindName != "_") env->vars[p.bindName] = v;
             return;
 
+        case ast::PatKind::Or:
+            for (const auto& alt : p.alts)
+                if (matchPat(*alt, v, env)) { bindPat(*alt, v, env); return; }
+            return;
+
+        case ast::PatKind::Slice:
+            for (size_t i = 0; i < p.elems.size() && v.vec &&
+                                i < v.vec->size(); ++i)
+                bindPat(*p.elems[i], (*v.vec)[i], env);
+            if (!p.restName.empty() && p.restName != "_" && v.vec) {
+                Value rest = v.k == VK::List
+                                 ? Value::list({v.vec->begin() + (int)p.elems.size(),
+                                                v.vec->end()})
+                                 : Value::tuple({v.vec->begin() + (int)p.elems.size(),
+                                                 v.vec->end()});
+                env->vars[p.restName] = rest;
+            }
+            return;
+
+        case ast::PatKind::Rest:
+            return;
+
+        case ast::PatKind::BindAlias:
+            if (p.aliasSub) bindPat(*p.aliasSub, v, env);
+            if (p.bindName != "_") env->vars[p.bindName] = v;
+            return;
+
         case ast::PatKind::Tuple:
             for (size_t i = 0; i < p.elems.size(); ++i)
                 if (v.vec && i < v.vec->size())
                     bindPat(*p.elems[i], (*v.vec)[i], env);
+            if (!p.restName.empty() && p.restName != "_" && v.vec &&
+                p.elems.size() <= v.vec->size()) {
+                Value rest = v.k == VK::List
+                                 ? Value::list({v.vec->begin() + (int)p.elems.size(),
+                                                v.vec->end()})
+                                 : Value::tuple({v.vec->begin() + (int)p.elems.size(),
+                                                 v.vec->end()});
+                env->vars[p.restName] = rest;
+            }
             return;
 
         case ast::PatKind::Ctor: {

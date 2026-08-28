@@ -98,7 +98,7 @@ OPERATOR        = "**"  | "//"  | "=="  | "!="  | "<="  | ">="  | "<<"
                 | "|="  | "^="  | "<<=" | ">>=" | "..=" | ".."  | "=>"
                 | ".?." | "->"  | "+"   | "-"   | "*"   | "/"   | "%"
                 | "&"   | "|"   | "^"   | "~"   | "<"   | ">"   | "="
-                | "?"   ;
+                | "?"   | "@" ;
 
 PUNCTUATION     = "("  | ")"  | "["  | "]"  | "{"  | "}"  | ","  | ":"
                 | "."  | ";"  ;
@@ -220,7 +220,10 @@ var_decl        = "var" target [ ":" type ] [ "=" expr ] ;
 
 (* ---- Statements ------------------------------------------------------------------ *)
 
-statement       = func_def | simple_stmt | compound_stmt ;
+statement       = func_def | labeled_stmt | simple_stmt | compound_stmt ;
+labeled_stmt    = IDENTIFIER , ":" , ( while_stmt | for_stmt ) ;
+(* `label: while ... { }` / `label: for ... { }` — target of `break label;`
+   and `continue label;` (Rust/Go loop-label style).                    *)
 
 simple_stmt     = ( import_decl | export_decl | const_decl
                   | assignment | aug_assign | var_decl | return_stmt
@@ -243,8 +246,8 @@ member_target   = primary_expr "." IDENTIFIER ;
 
 return_stmt     = "return" [ expr_list ] ;
 raise_stmt      = "raise" expr ;
-break_stmt      = "break" ;
-continue_stmt   = "continue" ;
+break_stmt      = "break" [ IDENTIFIER ] ;          (* labeled break          *)
+continue_stmt   = "continue" [ IDENTIFIER ] ;       (* labeled continue       *)
 defer_stmt      = "defer" call_expr ;            (* Go-style: call only *)
 del_stmt        = "del" target ;                 (* [PROVISIONAL] *)
 expr_stmt       = expr ;
@@ -353,9 +356,24 @@ set_display     = "{" expr_list "}" ;
 
 (* ---- Patterns (match / case / for-targets) ---------------------------------------- *)
 
-pattern         = ctor_pat | tuple_pat | range_pat | literal_pat
+pattern         = or_pattern ;
+or_pattern      = ctor_pat , { "|" , ctor_pat } ;   (* p1 | p2 alternation *)
+ctor_pat        = IDENTIFIER , "(" [ pat_field , { "," , pat_field } ] ")"
+                | slice_pat | alias_pat | tuple_pat | range_pat | literal_pat
                 | binding_pat | wildcard | group_pat ;
-(* Alternation within one arm (p1 | p2) deliberately NOT in v1.             *)
+alias_pat       = binding_pat , "@" , sub_pattern ;
+(* Rust-style `name @ sub-pattern`: binds the whole subject to `name` while
+   matching the sub-pattern (e.g. `case n @ 1..=5 {`, `case t @ (a, b) {`). *)
+sub_pattern     = ctor_pat | tuple_pat | range_pat | literal_pat
+                | wildcard | group_pat ;            (* no bare binding on RHS *)
+slice_pat       = "[" [ pat_item , { "," , pat_item } ]
+                  [ rest_pat ] "]" ;
+tuple_pat       = "(" [ pat_item , { "," , pat_item } ]
+                  [ rest_pat ] ")" ;
+pat_item        = pattern | rest_pat ;
+rest_pat        = ".." [ IDENTIFIER ] ;            (* Rust `..` / `..rest` *)
+(* Slice/tuple rest: `case [a, b, ..rest] {`, `case (first, ..tail) {`.
+   `..` itself (unnamed) matches zero-or-more trailing elements.        *)
 
 wildcard        = "_" ;
 group_pat       = "(" pattern ")" ;
@@ -421,6 +439,13 @@ type_postfix    = "?" ;               (* option sugar:  int? == option[int]  *)
 # 12. Struct fields accept optional leading `var` (mutable field) / `weak`.
 # 13. C-string literal `c"…"` added for FFI (NUL-terminated UTF-8).
 # 14. `<-expr` receive operator valid ONLY inside select arms (chan_op).
+# 15. Pattern features extended (Rust-style): or-patterns `p1 | p2`,
+#     bindings-as-aliases `name @ sub-pattern`, and slice/tuple rest `..rest`.
+#     `@` is parsed as a pattern-only operator (never a binary expression op).
+# 16. Loops may be labeled: `label: while ... ` / `label: for ...`. `break l;`
+#     and `continue l;` exit/skip that labeled loop from nested bodies
+#     (Go/Rust loop-label style). Unlabeled `break`/`continue` act on the
+#     innermost loop as before.
 # =============================================================================
 
 EOF_MARKER      = end_of_file ;

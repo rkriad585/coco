@@ -1137,7 +1137,7 @@ void Checker::checkPatternBindings(const ast::Pat& p, const TyP& subject) {
         }
 
         case PatKind::Tuple: {
-            if (subject && subject->is(TyK::Tuple) &&
+            if (subject && subject->is(TyK::Tuple) && p.restName.empty() &&
                 subject->args.size() != p.elems.size())
                 error(p.span.line, p.span.col,
                       "tuple pattern has " + std::to_string(p.elems.size()) +
@@ -1149,6 +1149,9 @@ void Checker::checkPatternBindings(const ast::Pat& p, const TyP& subject) {
                                : unkTy();
                 checkPatternBindings(*p.elems[i], elem);
             }
+            if (!p.restName.empty())
+                declareLocal(SymK::Var, p.restName, unkTy(), /*mut*/ true,
+                             p.span.line, p.span.col);
             break;
         }
 
@@ -1223,6 +1226,40 @@ void Checker::checkPatternBindings(const ast::Pat& p, const TyP& subject) {
                          p.span.line, p.span.col);
             break;
         }
+
+        case PatKind::BindAlias: {
+            // `pat @ name`: the alias name captures the whole subject; the
+            // sub-pattern is validated (and destructures) against it.
+            if (p.aliasSub) checkPatternBindings(*p.aliasSub, subject);
+            TyP bt = p.bindType ? resolveType(p.bindType) : unwrapOpt(subject);
+            declareLocal(SymK::Var, p.bindName, bt, /*mut*/ true,
+                         p.span.line, p.span.col);
+            break;
+        }
+
+        case PatKind::Or: {
+            // p1 | p2 | ...: every alternative must match the same subject.
+            for (const auto& alt : p.alts)
+                checkPatternBindings(*alt, subject);
+            break;
+        }
+
+        case PatKind::Slice: {
+            TyP elemTy = subject && subject->is(TyK::List)
+                             ? argAt(subject, 0)
+                         : subject && subject->is(TyK::Tuple)
+                             ? unkTy()
+                             : unkTy();
+            for (const auto& e : p.elems) checkPatternBindings(*e, elemTy);
+            if (!p.restName.empty())
+                declareLocal(SymK::Var, p.restName, subject ?
+                    (subject->is(TyK::List) ? subject : unkTy()) : unkTy(),
+                    /*mut*/ true, p.span.line, p.span.col);
+            break;
+        }
+
+        case PatKind::Rest:
+            break;
     }
 }
 

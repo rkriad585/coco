@@ -39,8 +39,8 @@ struct ThreadImpl {
 
 // Non-local control flow.
 struct SignalReturn { Value v; };
-struct SignalBreak {};
-struct SignalContinue {};
+struct SignalBreak { std::string label; };    // empty = unlabeled
+struct SignalContinue { std::string label; };
 struct PanicSignal { std::string msg; };
 struct SignalRaise { Value errResult; };
 

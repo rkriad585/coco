@@ -57,7 +57,7 @@ constexpr std::string_view kOps2[] = {
     "%=", "&=", "|=", "^=", "->", "<-", "..", "=>",
 };
 constexpr std::string_view kPunct1 = "()[]{},:.;";
-constexpr std::string_view kOp1 = "+-*/%&|^~<>=?";
+constexpr std::string_view kOp1 = "+-*/%&|^~<>=?@";
 
 bool isIdentStart(char c) {
     unsigned u = static_cast<unsigned char>(c);
