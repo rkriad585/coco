@@ -338,6 +338,48 @@ bool truthy(const Value& v) {
     }
 }
 
+// Human-readable name of a value's runtime type (for the `type()` builtin).
+static std::string typeName(const Value& v) {
+    switch (v.k) {
+        case VK::None:   return "none";
+        case VK::Bool:   return "bool";
+        case VK::Int:    return "int";
+        case VK::Float:  return "float";
+        case VK::Str:    return "string";
+        case VK::Bytes:  return "bytes";
+        case VK::Char:   return "char";
+        case VK::List:   return "list";
+        case VK::Set:    return "set";
+        case VK::Tuple:  return "tuple";
+        case VK::Dict:   return "dict";
+        case VK::Range:  return "range";
+        case VK::Struct: return v.typeName;
+        case VK::Heap:   return v.heap ? v.heap->typeName : "heap";
+        case VK::EnumV:  return v.typeName;
+        case VK::Result: return "result";
+        case VK::Fn:     return "fn";
+        case VK::Builtin:return "builtin";
+        case VK::Chan:   return "chan";
+        case VK::Module: return "module";
+        case VK::Ptr:    return "ptr";
+        default:         return "value";
+    }
+}
+
+// Accumulate numeric addition (int + int -> int; float involved -> float).
+static void numericAdd(Value& acc, const Value& item) {
+    if (acc.k == VK::Int && item.k == VK::Int) {
+        acc.i += item.i;
+    } else if ((acc.k == VK::Int || acc.k == VK::Float) &&
+               (item.k == VK::Int || item.k == VK::Float)) {
+        acc.k = VK::Float;
+        acc.d = (acc.k == VK::Int ? (double)acc.i : acc.d) +
+                (item.k == VK::Int ? (double)item.i : item.d);
+    } else {
+        panicHere("sum(): elements are not all numbers");
+    }
+}
+
 // ---------------------------------------------------------------------------
 // channels
 // ---------------------------------------------------------------------------
@@ -604,6 +646,224 @@ void Interpreter::installBuiltins() {
         const Value& p = a[0];
         return Value::integer(p.k == VK::Ptr ? (int64_t)strlen(p.s.c_str())
                                              : (int64_t)p.s.size());
+    });
+
+    // ---- WHY-1 / SP-8: batteries-included conversion & type builtins --------
+    globals_->vars["str"] = biFn({"x"}, [](std::vector<Value>& a) -> Value {
+        return Value::str(toStr(a[0]));
+    });
+    globals_->vars["int"] = biFn({"x"}, [](std::vector<Value>& a) -> Value {
+        const Value& v = a[0];
+        if (v.k == VK::Int) return v;
+        if (v.k == VK::Float) return Value::integer((int64_t)v.d);
+        if (v.k == VK::Bool) return Value::integer(v.b ? 1 : 0);
+        if (v.k == VK::Char) return Value::integer((int64_t)v.ch);
+        if (v.k == VK::Str) {
+            try { return Value::integer(std::stoll(v.s)); }
+            catch (...) { panicHere("int(): cannot parse '" + v.s + "'"); }
+        }
+        panicHere("int(): unsupported operand");
+    });
+    globals_->vars["float"] = biFn({"x"}, [](std::vector<Value>& a) -> Value {
+        const Value& v = a[0];
+        if (v.k == VK::Float) return v;
+        if (v.k == VK::Int) return Value::floating((double)v.i);
+        if (v.k == VK::Bool) return Value::floating(v.b ? 1.0 : 0.0);
+        if (v.k == VK::Str) {
+            try { return Value::floating(std::stod(v.s)); }
+            catch (...) { panicHere("float(): cannot parse '" + v.s + "'"); }
+        }
+        panicHere("float(): unsupported operand");
+    });
+    globals_->vars["bool"] = biFn({"x"}, [](std::vector<Value>& a) -> Value {
+        return Value::boolean(truthy(a[0]));
+    });
+    globals_->vars["type"] = biFn({"x"}, [](std::vector<Value>& a) -> Value {
+        return Value::str(typeName(a[0]));
+    });
+
+    // ---- WHY-1 / SP-8: collection & iteration builtins ----------------------
+    globals_->vars["sum"] = biFn({"xs"}, [this](std::vector<Value>& a) -> Value {
+        const Value& xs = a[0];
+        Value acc = Value::integer(0);
+        iterateSeq(xs, [&](Value& item, Env&) -> bool {
+            numericAdd(acc, item);
+            return true;
+        }, globals_);
+        return acc;
+    });
+    globals_->vars["min"] = biFn({"xs"}, [this](std::vector<Value>& a) -> Value {
+        const Value& xs = a[0];
+        bool first = true; Value best;
+        iterateSeq(xs, [&](Value& item, Env&) -> bool {
+            if (first) { best = item; first = false; }
+            else if (valLess(item, best)) best = item;
+            return true;
+        }, globals_);
+        if (first) panicHere("min(): empty sequence");
+        return best;
+    });
+    globals_->vars["max"] = biFn({"xs"}, [this](std::vector<Value>& a) -> Value {
+        const Value& xs = a[0];
+        bool first = true; Value best;
+        iterateSeq(xs, [&](Value& item, Env&) -> bool {
+            if (first) { best = item; first = false; }
+            else if (valLess(best, item)) best = item;
+            return true;
+        }, globals_);
+        if (first) panicHere("max(): empty sequence");
+        return best;
+    });
+    globals_->vars["any"] = biFn({"xs"}, [this](std::vector<Value>& a) -> Value {
+        const Value& xs = a[0];
+        bool r = false;
+        iterateSeq(xs, [&](Value& item, Env&) -> bool {
+            if (truthy(item)) { r = true; return false; }
+            return true;
+        }, globals_);
+        return Value::boolean(r);
+    });
+    globals_->vars["all"] = biFn({"xs"}, [this](std::vector<Value>& a) -> Value {
+        const Value& xs = a[0];
+        bool r = true;
+        iterateSeq(xs, [&](Value& item, Env&) -> bool {
+            if (!truthy(item)) { r = false; return false; }
+            return true;
+        }, globals_);
+        return Value::boolean(r);
+    });
+    globals_->vars["sorted"] = biFn({"xs"}, [this](std::vector<Value>& a) -> Value {
+        const Value& xs = a[0];
+        std::vector<Value> out;
+        iterateSeq(xs, [&](Value& item, Env&) -> bool {
+            out.push_back(item); return true;
+        }, globals_);
+        std::stable_sort(out.begin(), out.end(), [](const Value& x, const Value& y) {
+            return valLess(x, y);
+        });
+        return Value::list(std::move(out));
+    });
+    globals_->vars["reversed"] = biFn({"xs"}, [this](std::vector<Value>& a) -> Value {
+        const Value& xs = a[0];
+        std::vector<Value> out;
+        iterateSeq(xs, [&](Value& item, Env&) -> bool {
+            out.push_back(item); return true;
+        }, globals_);
+        std::reverse(out.begin(), out.end());
+        return Value::list(std::move(out));
+    });
+    globals_->vars["enumerate"] = biFn({"xs"}, [this](std::vector<Value>& a) -> Value {
+        const Value& xs = a[0];
+        std::vector<Value> out;
+        int64_t i = 0;
+        iterateSeq(xs, [&](Value& item, Env&) -> bool {
+            out.push_back(Value::tuple({Value::integer(i++), item}));
+            return true;
+        }, globals_);
+        return Value::list(std::move(out));
+    });
+    globals_->vars["map"] = biFn({"f", "xs"}, [this](std::vector<Value>& a) -> Value {
+        const Value& f = a[0];
+        const Value& xs = a[1];
+        std::vector<Value> out;
+        iterateSeq(xs, [&](Value& item, Env&) -> bool {
+            out.push_back(callValue(f, {item}, 0, 0));
+            return true;
+        }, globals_);
+        return Value::list(std::move(out));
+    });
+    globals_->vars["filter"] = biFn({"f", "xs"}, [this](std::vector<Value>& a) -> Value {
+        const Value& f = a[0];
+        const Value& xs = a[1];
+        std::vector<Value> out;
+        iterateSeq(xs, [&](Value& item, Env&) -> bool {
+            if (truthy(callValue(f, {item}, 0, 0))) out.push_back(item);
+            return true;
+        }, globals_);
+        return Value::list(std::move(out));
+    });
+    globals_->vars["reduce"] = biFn({"f", "xs", "init"}, [this](std::vector<Value>& a) -> Value {
+        const Value& f = a[0];
+        const Value& xs = a[1];
+        Value acc = a[2];
+        iterateSeq(xs, [&](Value& item, Env&) -> bool {
+            acc = callValue(f, {acc, item}, 0, 0);
+            return true;
+        }, globals_);
+        return acc;
+    });
+
+    // ---- WHY-1 / SP-8: string operations -----------------------------------
+    globals_->vars["upper"] = biFn({"s"}, [](std::vector<Value>& a) -> Value {
+        std::string out = a[0].s;
+        for (auto& c : out) c = (char)std::toupper((unsigned char)c);
+        return Value::str(out);
+    });
+    globals_->vars["lower"] = biFn({"s"}, [](std::vector<Value>& a) -> Value {
+        std::string out = a[0].s;
+        for (auto& c : out) c = (char)std::tolower((unsigned char)c);
+        return Value::str(out);
+    });
+    globals_->vars["trim"] = biFn({"s"}, [](std::vector<Value>& a) -> Value {
+        const std::string& s = a[0].s;
+        size_t b = s.find_first_not_of(" \t\r\n");
+        if (b == std::string::npos) return Value::str("");
+        size_t e = s.find_last_not_of(" \t\r\n");
+        return Value::str(s.substr(b, e - b + 1));
+    });
+    globals_->vars["contains"] = biFn({"s", "sub"}, [](std::vector<Value>& a) -> Value {
+        return Value::boolean(a[0].s.find(a[1].s) != std::string::npos);
+    });
+    globals_->vars["starts_with"] = biFn({"s", "prefix"}, [](std::vector<Value>& a) -> Value {
+        const std::string& s = a[0].s;
+        const std::string& p = a[1].s;
+        return Value::boolean(s.size() >= p.size() && s.compare(0, p.size(), p) == 0);
+    });
+    globals_->vars["ends_with"] = biFn({"s", "suffix"}, [](std::vector<Value>& a) -> Value {
+        const std::string& s = a[0].s;
+        const std::string& p = a[1].s;
+        return Value::boolean(s.size() >= p.size() &&
+                              s.compare(s.size() - p.size(), p.size(), p) == 0);
+    });
+    globals_->vars["replace"] = biFn({"s", "from", "to"}, [](std::vector<Value>& a) -> Value {
+        std::string s = a[0].s;
+        const std::string& f = a[1].s;
+        const std::string& t = a[2].s;
+        if (f.empty()) return Value::str(s);
+        size_t pos = 0;
+        while ((pos = s.find(f, pos)) != std::string::npos) {
+            s.replace(pos, f.size(), t);
+            pos += t.size();
+        }
+        return Value::str(s);
+    });
+    globals_->vars["split"] = biFn({"s", "sep"}, [](std::vector<Value>& a) -> Value {
+        const std::string& s = a[0].s;
+        const std::string& sep = a[1].s;
+        std::vector<Value> out;
+        if (sep.empty()) {
+            for (char c : s) out.push_back(Value::str(std::string(1, c)));
+            return Value::list(std::move(out));
+        }
+        size_t pos = 0, start = 0;
+        while ((pos = s.find(sep, start)) != std::string::npos) {
+            out.push_back(Value::str(s.substr(start, pos - start)));
+            start = pos + sep.size();
+        }
+        out.push_back(Value::str(s.substr(start)));
+        return Value::list(std::move(out));
+    });
+    globals_->vars["join"] = biFn({"sep", "xs"}, [this](std::vector<Value>& a) -> Value {
+        const std::string& sep = a[0].s;
+        std::string out;
+        bool first = true;
+        iterateSeq(a[1], [&](Value& item, Env&) -> bool {
+            if (!first) out += sep;
+            out += toStr(item);
+            first = false;
+            return true;
+        }, globals_);
+        return Value::str(out);
     });
 
     // pseudo-modules are prebound; explicit imports rebind the same values

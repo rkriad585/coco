@@ -343,6 +343,43 @@ void Checker::predeclareBuiltins() {
     makeBuiltinFunc("assert_eq", {unkTy(), unkTy()}, {"a", "b"}, noneTy(),
                     false, 2);
 
+    // WHY-1 / SP-8: batteries-included conversion & collection builtins.
+    // Polymorphic params use Unknown (dynamic v1) matched at runtime.
+    makeBuiltinFunc("str", {unkTy()}, {"x"}, strTy(), false, 1);
+    makeBuiltinFunc("int", {unkTy()}, {"x"}, intTy(), false, 1);
+    makeBuiltinFunc("float", {unkTy()}, {"x"}, floatTy(), false, 1);
+    makeBuiltinFunc("bool", {unkTy()}, {"x"}, boolTy(), false, 1);
+    makeBuiltinFunc("type", {unkTy()}, {"x"}, strTy(), false, 1);
+    makeBuiltinFunc("sum", {unkTy()}, {"xs"}, unkTy(), false, 1);
+    makeBuiltinFunc("min", {unkTy()}, {"xs"}, unkTy(), false, 1);
+    makeBuiltinFunc("max", {unkTy()}, {"xs"}, unkTy(), false, 1);
+    makeBuiltinFunc("any", {unkTy()}, {"xs"}, boolTy(), false, 1);
+    makeBuiltinFunc("all", {unkTy()}, {"xs"}, boolTy(), false, 1);
+    makeBuiltinFunc("sorted", {unkTy()}, {"xs"}, listTy(unkTy()), false, 1);
+    makeBuiltinFunc("reversed", {unkTy()}, {"xs"}, listTy(unkTy()), false, 1);
+    makeBuiltinFunc("enumerate", {unkTy()}, {"xs"}, listTy(unkTy()), false, 1);
+    makeBuiltinFunc("map", {unkTy(), unkTy()}, {"f", "xs"}, listTy(unkTy()),
+                    false, 2);
+    makeBuiltinFunc("filter", {unkTy(), unkTy()}, {"f", "xs"}, listTy(unkTy()),
+                    false, 2);
+    makeBuiltinFunc("reduce", {unkTy(), unkTy(), unkTy()},
+                    {"f", "xs", "init"}, unkTy(), false, 3);
+    makeBuiltinFunc("upper", {strTy()}, {"s"}, strTy(), false, 1);
+    makeBuiltinFunc("lower", {strTy()}, {"s"}, strTy(), false, 1);
+    makeBuiltinFunc("trim", {strTy()}, {"s"}, strTy(), false, 1);
+    makeBuiltinFunc("contains", {strTy(), strTy()}, {"s", "sub"}, boolTy(),
+                    false, 2);
+    makeBuiltinFunc("starts_with", {strTy(), strTy()}, {"s", "prefix"},
+                    boolTy(), false, 2);
+    makeBuiltinFunc("ends_with", {strTy(), strTy()}, {"s", "suffix"}, boolTy(),
+                    false, 2);
+    makeBuiltinFunc("replace", {strTy(), strTy(), strTy()},
+                    {"s", "from", "to"}, strTy(), false, 3);
+    makeBuiltinFunc("split", {strTy(), strTy()}, {"s", "sep"}, listTy(strTy()),
+                    false, 2);
+    makeBuiltinFunc("join", {strTy(), unkTy()}, {"sep", "xs"}, strTy(), false,
+                    2);
+
     // keyword constants
     declareConst("true", boolTy());
     declareConst("false", boolTy());
