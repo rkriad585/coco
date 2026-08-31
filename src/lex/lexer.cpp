@@ -96,6 +96,16 @@ char Lexer::peek(size_t off) const {
 
 void Lexer::diagHere(std::string msg) { diags_.report(line_, col_, std::move(msg)); }
 
+void Lexer::stampExtent(Token& t) {
+    // At call time line_/col_ sit just past the last consumed char, so the
+    // extent end is (line_, col_-1) for a same-line token. Newline separators
+    // between multi-line strings/f-strings make the end a whole line; we use
+    // col_-1 clamped to >= t.col for the common single-line case.
+    t.endLine = line_;
+    t.endCol = (col_ > 1) ? (col_ - 1) : 1;
+    if (t.endLine == t.line && t.endCol < t.col) t.endCol = t.col;
+}
+
 void Lexer::skipInlineWs() {
     while (pos_ < src_.size() && (src_[pos_] == ' ' || src_[pos_] == '\t'))
         advanceWs();
@@ -192,6 +202,7 @@ void Lexer::fill() {
             sp.text = specBuf_;
             sp.line = line_;
             sp.col = col_;
+            stampExtent(sp);
             specBuf_.clear();
             specActive_ = false;
             queue_.push_back(std::move(sp));
@@ -201,6 +212,7 @@ void Lexer::fill() {
                 rb.text = "}";
                 rb.line = line_;
                 rb.col = col_;
+                stampExtent(rb);
                 queue_.push_back(std::move(rb));
                 fsMode_ = FsMode::Text;
                 ++pos_;
@@ -221,6 +233,7 @@ void Lexer::fill() {
             continue;
         }
         Token t = lexToken();
+        stampExtent(t);
         queue_.push_back(std::move(t));
         lineHasToken_ = true;
     }

@@ -112,12 +112,13 @@ static int runSources(const std::string& label, const std::string& src,
                       const std::map<std::string, std::string>* embedded) {
     coco::DiagEngine diags;
     auto toks = coco::Lexer(src, label, diags).lexAll();
-    if (diags.count() == 0) {
+    int ret = 0;
+    if (diags.errorCount() == 0) {
         auto body = coco::Parser(toks, diags).parseProgram();
-        if (diags.count() == 0) {
+        if (diags.errorCount() == 0) {
             coco::sema::Checker checker(diags);
             checker.checkModule(body);
-            if (diags.count() == 0) {
+            if (diags.errorCount() == 0) {
                 coco::ast::Stmt module;
                 module.kind = coco::ast::StKind::Pass;
                 module.body = std::move(body);
@@ -128,27 +129,37 @@ static int runSources(const std::string& label, const std::string& src,
                         for (const auto& [name, esrc] : *embedded)
                             interp.addEmbeddedSource(name, esrc);
                     coco::interp::Value r = interp.run();
-                    return r.k == coco::interp::VK::Int ? (int)r.i : 0;
+                    ret = r.k == coco::interp::VK::Int ? (int)r.i : 0;
                 } catch (const coco::interp::PanicSignal& p) {
                     fflush(stdout);
                     fputs(("panic: " + p.msg + "\n").c_str(), stderr);
-                    return 70;
+                    for (const auto& f : p.frames)
+                        fputs(("  " + f + "\n").c_str(), stderr);
+                    ret = 70;
                 } catch (const coco::interp::SignalRaise&) {
                     fflush(stdout);
                     fputs("panic: uncaught raise escaped main\n", stderr);
-                    return 70;
+                    ret = 70;
                 }
             }
         }
     }
-    for (const auto& d : diags.diags())
-        std::cout << label << ":" << d.line << ":" << d.col
-                  << ": error: " << d.message << "\n";
-    if (diags.count() != 0) {
-        std::cout << label << ": " << diags.count() << " error(s)\n";
+    if (diags.errorCount() != 0) {
+        for (const auto& d : diags.diags())
+            if (d.sev == coco::Sev::Error || d.sev == coco::Sev::InternalError)
+                std::cout << label << ":" << d.line << ":" << d.col
+                          << ": error: " << d.message << "\n";
+        std::cout << label << ": " << diags.errorCount() << " error(s)\n";
         return 1;
     }
-    return 0;
+    if (diags.warningCount()) {
+        coco::SourceMap sm(src);
+        std::string out;
+        coco::renderDiags(label, sm, diags.diags(), /*color*/ false,
+                          /*plain*/ false, out);
+        std::cout << out;
+    }
+    return ret;
 }
 
 int main(int argc, char** argv) {
@@ -182,46 +193,5 @@ int main(int argc, char** argv) {
 
     std::string src;
     if (!readFile(file, src)) return 2;
-
-    coco::DiagEngine diags;
-    auto toks = coco::Lexer(src, file, diags).lexAll();
-
-    size_t front = diags.count();
-    if (front == 0) {
-        auto body = coco::Parser(toks, diags).parseProgram();
-        front = diags.count();
-        if (front == 0) {
-            coco::sema::Checker checker(diags);
-            checker.checkModule(body);
-        }
-        if (front == 0) {
-            coco::ast::Stmt module;
-            module.kind = coco::ast::StKind::Pass;
-            module.body = std::move(body);
-
-            try {
-                coco::interp::Interpreter interp(module);
-                addModuleDirs(interp, file);
-                coco::interp::Value r = interp.run();
-                return r.k == coco::interp::VK::Int ? (int)r.i : 0;
-            } catch (const coco::interp::PanicSignal& p) {
-                fflush(stdout);
-                fputs(("panic: " + p.msg + "\n").c_str(), stderr);
-                return 70;
-            } catch (const coco::interp::SignalRaise&) {
-                fflush(stdout);
-                fputs("panic: uncaught raise escaped main\n", stderr);
-                return 70;
-            }
-        }
-    }
-
-    for (const auto& d : diags.diags())
-        std::cout << file << ":" << d.line << ":" << d.col
-                  << ": error: " << d.message << "\n";
-    if (diags.count() != 0) {
-        std::cout << file << ": " << diags.count() << " error(s)\n";
-        return 1;
-    }
-    return 0;
+    return runSources(file, src, nullptr);
 }

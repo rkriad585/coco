@@ -5,7 +5,10 @@
 pub def fizzbuzz(n: int) -> string {
     match n {
         case x if x % 15 == 0 { return "fizzbuzz"; }
-        case x @ (3 | 6 | 9 | 12) { return "fizz"; }
+        case x @ (3 | 6 | 9 | 12) {
+            if x % 2 == 0 { return "fizz"; }
+            return "fizz";
+        }
         case 5 | 10 { return "buzz"; }
         case _ { return "n"; }
     }

@@ -132,6 +132,75 @@ void Checker::error(uint32_t line, uint32_t col, const std::string& msg) {
     diags_.report(line, col, msg);
 }
 
+void Checker::error(const ast::Span& s, const std::string& msg) {
+    if (quiet_ > 0) return;   // speculative re-walk: real pass already reported
+    // Richer path: use the full extent when the AST node carries one.
+    if (s.endLine || s.endCol) {
+        diags_.error(SpanRange{s.line, s.col, s.endLine, s.endCol + 1})
+            .msg(msg)
+            .emit();
+    } else {
+        diags_.report(s.line, s.col, msg);
+    }
+}
+
+void Checker::warning(SpanRange span, const std::string& code,
+                      const std::string& msg) {
+    if (quiet_ > 0) return;   // speculative re-walk: real pass already reported
+    if (lintAllow_.count(code)) return;
+    if (lintDeny_.count(code)) {
+        diags_.error(span).code(code).msg(msg).emit();
+        return;
+    }
+    diags_.warning(span).code(code).msg(msg).emit();
+}
+
+void Checker::reportUnused(Scope& s, bool topLevel) {
+    for (auto& [name, sym] : s.syms) {
+        if (sym->used || sym->pub) continue;
+        if (topLevel) {
+            switch (sym->kind) {
+                case SymK::Func:
+                    if (name == "main") break;   // entry point
+                    warning(SpanRange::point(sym->declLine, sym->declCol),
+                            "W0103",
+                            "unused function '" + name + "'");
+                    break;
+                case SymK::ImportRoot:
+                    // star imports and re-exports are exempt; the import
+                    // statement owns the binding, so point the caret there.
+                    if (sym->importStmt) {
+                        const ast::Stmt& im = *sym->importStmt;
+                        if (im.starImport) break;
+                        if (im.pub) break;
+                        warning(SpanRange::point(im.span.line, im.span.col),
+                                "W0101", "unused import '" + name + "'");
+                    }
+                    break;
+                case SymK::Const:
+                    warning(SpanRange::point(sym->declLine, sym->declCol),
+                            "W0102", "unused constant '" + name + "'");
+                    break;
+                default:
+                    break;
+            }
+            continue;
+        }
+if (sym->kind == SymK::Var || sym->kind == SymK::Param ||
+            sym->kind == SymK::Const) {
+            if (name == "_" || name == "self") continue;   // idiomatic
+            if (name.size() > 1 && name[0] == '_') continue;   // intentional
+            warning(SpanRange::point(sym->declLine, sym->declCol),
+                    "W0102", "unused variable '" + name + "'");
+            if ((sym->kind == SymK::Var || sym->kind == SymK::Param) &&
+                sym->mut && sym->used && !sym->mutated)
+                warning(SpanRange::point(sym->declLine, sym->declCol),
+                        "W0106",
+                        "'var' binding '" + name + "' is never mutated");
+        }
+    }
+}
+
 Scope& Checker::push() {
     scope_ = new Scope(scope_);
     return *scope_;
@@ -139,6 +208,7 @@ Scope& Checker::push() {
 
 void Checker::pop() {
     Scope* p = scope_->parent;
+    if (scope_ != p) reportUnused(*scope_, /*topLevel*/ false);
     delete scope_;
     scope_ = p;
 }
@@ -151,6 +221,18 @@ SymP Checker::declareLocal(SymK kind, const std::string& name, TyP t, bool mut,
     sym->type = std::move(t);
     sym->mut = mut;
     sym->homeScope = scope_ ? scope_->id : 0;
+    sym->declLine = line;
+    sym->declCol = col;
+    // W0105: a local that hides a binding from an outer scope.
+    if (kind == SymK::Var || kind == SymK::Param) {
+        if (Symbol* shadowed = scope_->parent ? scope_->parent->find(name)
+                                              : nullptr) {
+            if (shadowed->kind == SymK::Var || shadowed->kind == SymK::Param ||
+                shadowed->kind == SymK::Const || shadowed->kind == SymK::ImportRoot)
+                warning(SpanRange::point(line, col), "W0105",
+                        "variable '" + name + "' shadows an outer binding");
+        }
+    }
     if (Symbol* clash = scope_->declare(sym))
         error(line, col, "'" + name + "' is already defined in this scope");
     return sym;
@@ -207,6 +289,7 @@ void Checker::checkModule(const std::vector<ast::StmtP>& prog) {
                 break;
         }
     }
+    reportUnused(*scope_, /*topLevel*/ true);
     pop();
 }
 
@@ -277,6 +360,7 @@ SymP Checker::declareConst(std::string name, TyP t) {
     sym->kind = SymK::Const;
     sym->name = std::move(name);
     sym->type = std::move(t);
+    sym->used = true;    // keyword literals are always "used"
     scope_->declare(sym);
     return sym;
 }
@@ -293,6 +377,7 @@ SymP Checker::makeBuiltinFunc(std::string name, std::vector<TyP> params,
     sym->sig.variadic = variadic;
     sym->sig.required = required;
     funcs_[sym->name] = sym;
+    sym->used = true;                // builtins are exempt from the unused-func lint
     scope_->declare(sym);
     return sym;
 }
@@ -380,7 +465,7 @@ void Checker::fillNominals(const std::vector<ast::StmtP>& prog) {
                         for (const auto& p : vs->payloads)
                             es->variantPayloads[v.name].push_back(p);
                     if (Symbol* clash = scope_->declare(vs))
-                        error(v.span.line, v.span.col,
+                        error(v.span,
                               "'" + v.name + "' is already defined");
                 }
                 break;
@@ -412,7 +497,7 @@ void Checker::fillStructBody(SymP stSym, const ast::Stmt& s) {
             push();
             TyP vt = checkExpr(*f.defaultValue);
             if (!assignable(vt, ft))
-                error(f.span.line, f.span.col,
+                error(f.span,
                       "default for field '" + f.name + "' has type " +
                           toString(*vt) + ", expected " + toString(*ft));
             pop();
@@ -474,16 +559,18 @@ void Checker::registerTopLevel(const std::vector<ast::StmtP>& prog) {
                     for (const auto& item : st->importItems) {
                         std::string n = item.alias.empty() ? item.name : item.alias;
                         importRoots_.insert(n);
-                        declareLocal(SymK::ImportRoot, n, unkTy(), false,
-                                     st->span.line, st->span.col);
+                        SymP im = declareLocal(SymK::ImportRoot, n, unkTy(), false,
+                                               st->span.line, st->span.col);
+                        im->importStmt = st.get();
                     }
                     break;
                 }
                 std::string root = importRootOf(*st);
                 if (root.empty()) break;
                 importRoots_.insert(root);
-                declareLocal(SymK::ImportRoot, root, unkTy(), false,
-                             st->span.line, st->span.col);
+                SymP im = declareLocal(SymK::ImportRoot, root, unkTy(), false,
+                                       st->span.line, st->span.col);
+                im->importStmt = st.get();
                 break;
             }
 
@@ -968,7 +1055,25 @@ std::optional<FuncSig> Checker::methodLookup(const TyP& recv,
 // ================================ statements ================================
 
 void Checker::checkBlock(const std::vector<ast::StmtP>& body) {
-    for (const auto& st : body) checkStmt(*st);
+    bool unreachable = false;
+    for (const auto& st : body) {
+        if (unreachable) {
+            warning(SpanRange::point(st->span.line, st->span.col), "W0104",
+                    "unreachable statement (dead code)");
+            break;   // report once per block
+        }
+        checkStmt(*st);
+        switch (st->kind) {
+            case StKind::Return:
+            case StKind::Raise:
+            case StKind::Break:
+            case StKind::Continue:
+                unreachable = true;
+                break;
+            default:
+                break;
+        }
+    }
 }
 
 void Checker::requireBool(const TyP& t, uint32_t line, uint32_t col,
@@ -984,8 +1089,9 @@ void Checker::checkReassignable(const ast::Expr& tgt) {
     if (tgt.kind != ExKind::Ident) return;      // index/member targets: v1 lenient
     Symbol* ex = scope_->find(tgt.text);
     if (!ex) return;                            // fresh binding via assignment
+    ex->mutated = true;
     if (!ex->mut && ex->homeScope == scope_->id)
-        error(tgt.span.line, tgt.span.col,
+        error(tgt.span,
               "cannot reassign immutable binding '" + tgt.text +
                   "' (declare it with var)");
 }
@@ -1009,11 +1115,11 @@ void Checker::assignTarget(const ast::Expr& tgt, const TyP& vt, bool multi) {
             if (tt && !tt->isError() && !tt->isUnknown() && vt &&
                 !vt->isError() && !vt->isUnknown()) {
                 if (tt->is(TyK::List) && !assignable(vt, argAt(tt, 0)))
-                    error(tgt.span.line, tgt.span.col,
+                    error(tgt.span,
                           "list element expects " + toString(*argAt(tt, 0)) +
                               ", got " + toString(*vt));
                 else if (tt->is(TyK::Dict) && !assignable(vt, argAt(tt, 1)))
-                    error(tgt.span.line, tgt.span.col,
+                    error(tgt.span,
                           "dict value expects " + toString(*argAt(tt, 1)) +
                               ", got " + toString(*vt));
             }
@@ -1031,7 +1137,7 @@ void Checker::assignTarget(const ast::Expr& tgt, const TyP& vt, bool multi) {
         }
         default:
             checkExpr(tgt);
-            error(tgt.span.line, tgt.span.col, "invalid assignment target");
+            error(tgt.span, "invalid assignment target");
             break;
     }
 }
@@ -1063,7 +1169,7 @@ void Checker::checkAssignTargets(const ast::Stmt& s) {
         return;
     }
     if (nT != valTys.size()) {
-        error(s.span.line, s.span.col, "assignment target/value count mismatch");
+        error(s.span, "assignment target/value count mismatch");
         return;
     }
     bool multi = nT > 1;                    // parallel assignment: mutable slots
@@ -1096,7 +1202,7 @@ void Checker::checkFuncLike(const ast::Stmt& s, TyP selfTy, SymP funcSym) {
     if (s.body.empty() && !s.externDef && s.kind == StKind::FuncDef &&
         currentRet_ && !currentRet_->is(TyK::None) &&
         !currentRet_->isUnknown())
-        error(s.span.line, s.span.col,
+        error(s.span,
               "function '" + s.name + "' declares a return type but has no body statements");
     checkBlock(s.body);
     pop();
@@ -1130,7 +1236,7 @@ void Checker::checkPatternBindings(const ast::Pat& p, const TyP& subject) {
             if (subject && !subject->isUnknown() && !subject->isError() &&
                 !subject->is(TyK::TypeVar) && !isNumeric(*subject) &&
                 !subject->is(TyK::Char))
-                error(p.span.line, p.span.col,
+                error(p.span,
                       "range pattern requires a numeric or char subject, got " +
                           toString(*subject));
             break;
@@ -1139,7 +1245,7 @@ void Checker::checkPatternBindings(const ast::Pat& p, const TyP& subject) {
         case PatKind::Tuple: {
             if (subject && subject->is(TyK::Tuple) && p.restName.empty() &&
                 subject->args.size() != p.elems.size())
-                error(p.span.line, p.span.col,
+                error(p.span,
                       "tuple pattern has " + std::to_string(p.elems.size()) +
                           " elements but subject has " +
                           std::to_string(subject->args.size()));
@@ -1174,14 +1280,14 @@ void Checker::checkPatternBindings(const ast::Pat& p, const TyP& subject) {
                         payloads = sit->second->fields;
                         known = true;
                     } else {
-                        error(p.span.line, p.span.col,
+                        error(p.span,
                               "unknown variant '" + p.ctorName + "'");
                         break;
                     }
                 } else {
                     if (subject && subject->is(TyK::EnumName) &&
                         subject->name != vs->enumOf)
-                        error(p.span.line, p.span.col,
+                        error(p.span,
                               "'" + p.ctorName + "' belongs to enum '" +
                                   vs->enumOf + "', not '" + subject->name + "'");
                     payloads = vs->payloads;
@@ -1210,7 +1316,7 @@ void Checker::checkPatternBindings(const ast::Pat& p, const TyP& subject) {
                 checkPatternBindings(*f->pat, pl.second);
             }
             if (pi < positional.size())
-                error(p.span.line, p.span.col,
+                error(p.span,
                       "too many fields in variant pattern '" + p.ctorName + "'");
             for (const auto& [nm, f] : named)
                 error(f->pat->span.line, f->pat->span.col,
@@ -1222,8 +1328,15 @@ void Checker::checkPatternBindings(const ast::Pat& p, const TyP& subject) {
         case PatKind::Bind: {
             // binding patterns match the payload: T? subject binds T
             TyP bt = p.bindType ? resolveType(p.bindType) : unwrapOpt(subject);
-            declareLocal(SymK::Var, p.bindName, bt, /*mut*/ true,
-                         p.span.line, p.span.col);
+            SymP bound = declareLocal(SymK::Var, p.bindName, bt, /*mut*/ true,
+                                      p.span.line, p.span.col);
+            // A bare ident that names an in-scope enum variant / struct is a
+            // discriminant match, not a user binding: never warn as unused.
+            if (scope_->parent)
+                if (Symbol* disc = scope_->parent->find(p.bindName))
+                    if (disc->kind == SymK::EnumVariant ||
+                        disc->kind == SymK::Struct)
+                        bound->used = true;
             break;
         }
 
@@ -1232,8 +1345,13 @@ void Checker::checkPatternBindings(const ast::Pat& p, const TyP& subject) {
             // sub-pattern is validated (and destructures) against it.
             if (p.aliasSub) checkPatternBindings(*p.aliasSub, subject);
             TyP bt = p.bindType ? resolveType(p.bindType) : unwrapOpt(subject);
-            declareLocal(SymK::Var, p.bindName, bt, /*mut*/ true,
-                         p.span.line, p.span.col);
+            SymP bound = declareLocal(SymK::Var, p.bindName, bt, /*mut*/ true,
+                                      p.span.line, p.span.col);
+            if (scope_->parent)
+                if (Symbol* disc = scope_->parent->find(p.bindName))
+                    if (disc->kind == SymK::EnumVariant ||
+                        disc->kind == SymK::Struct)
+                        bound->used = true;
             break;
         }
 
@@ -1278,7 +1396,7 @@ void Checker::checkStmt(const ast::Stmt& s) {
             TyP ann = s.declType ? resolveType(s.declType) : nullptr;
             TyP vt = s.value ? checkExpr(*s.value) : unkTy();
             if (ann && !assignable(vt, ann))
-                error(s.span.line, s.span.col,
+                error(s.span,
                       "'" + n + "' declared as " + toString(*ann) +
                           " but initialized with " + toString(*vt));
             declareLocal(s.kind == StKind::ConstDecl ? SymK::Const : SymK::Var,
@@ -1310,15 +1428,15 @@ void Checker::checkStmt(const ast::Stmt& s) {
                 bool lists = tt->is(TyK::List) && vt->is(TyK::List);
                 if (!num && !strcat && !lists && !tt->isUnknown() &&
                     !vt->isUnknown() && !tt->isError() && !vt->isError())
-                    error(tgt.span.line, tgt.span.col,
+                    error(tgt.span,
                           "invalid operands to += (" + toString(*tt) + " and " +
                               toString(*vt) + ")");
             } else if (numericOp) {
                 if (!isNumeric(*tt) && !tt->isUnknown() && !tt->isError())
-                    error(tgt.span.line, tgt.span.col,
+                    error(tgt.span,
                           "operator '" + op + "' requires a numeric left operand");
                 if (!isNumeric(*vt) && !vt->isUnknown() && !vt->isError())
-                    error(tgt.span.line, tgt.span.col,
+                    error(tgt.span,
                           "operator '" + op + "' requires a numeric right operand");
             }
             checkReassignable(tgt);
@@ -1339,7 +1457,7 @@ void Checker::checkStmt(const ast::Stmt& s) {
                 if (vt && vt->is(TyK::Opt) && assignable(unwrapOpt(vt), okT))
                     break;
             }
-            error(s.span.line, s.span.col,
+            error(s.span,
                   "return type mismatch: got " + toString(*vt) + ", expected " +
                       toString(*currentRet_));
             break;
@@ -1352,7 +1470,7 @@ void Checker::checkStmt(const ast::Stmt& s) {
         case StKind::Break:
         case StKind::Continue:
             if (loopDepth_ <= 0)
-                error(s.span.line, s.span.col,
+                error(s.span,
                       s.kind == StKind::Break ? "'break' outside of a loop"
                                               : "'continue' outside of a loop");
             break;
@@ -1363,7 +1481,7 @@ void Checker::checkStmt(const ast::Stmt& s) {
                 const ast::Expr& call = *s.exprs[0];
                 checkExpr(call);
                 if (call.kind != ExKind::Call)
-                    error(s.span.line, s.span.col,
+                    error(s.span,
                           std::string(s.kind == StKind::Spawn ? "spawn"
                                                               : "defer") +
                               " expects a function call");
@@ -1418,7 +1536,7 @@ void Checker::checkStmt(const ast::Stmt& s) {
             TyP elem = iterableElem(subj);
             push();
             if (elem && elem->isError() && subj && !subj->isError())
-                error(s.span.line, s.span.col,
+                error(s.span,
                       "expression of type " + toString(*subj) +
                           " is not iterable");
             else
@@ -1489,8 +1607,9 @@ void Checker::checkStmt(const ast::Stmt& s) {
             std::string root = importRootOf(s);
             if (root.empty()) break;
             importRoots_.insert(root);
-            declareLocal(SymK::ImportRoot, root, unkTy(), false,
-                         s.span.line, s.span.col);
+            SymP im = declareLocal(SymK::ImportRoot, root, unkTy(), false,
+                                   s.span.line, s.span.col);
+            im->importStmt = &s;
             break;
         }
 
@@ -1524,10 +1643,11 @@ TyP Checker::checkExpr(const ast::Expr& e) {
             Symbol* sym = scope_->find(e.text);
             if (!sym) {
                 if (importRoots_.count(e.text)) return unkTy();
-                error(e.span.line, e.span.col,
+                error(e.span,
                       "undefined variable '" + e.text + "'");
                 return errTy();
             }
+            sym->used = true;
             if (sym->kind == SymK::Func)
                 return fnTy(sym->sig.params, sym->sig.ret);
             if (sym->kind == SymK::EnumName) {
@@ -1546,14 +1666,14 @@ TyP Checker::checkExpr(const ast::Expr& e) {
             }
             if (op == "-" || op == "+") {
                 if (!dynish(t) && !isNumeric(*t))
-                    error(e.span.line, e.span.col,
+                    error(e.span,
                           "unary '" + op + "' requires a numeric operand, got " +
                               toString(*t));
                 return t;
             }
             if (op == "~") {
                 if (!dynish(t) && !t->is(TyK::Int))
-                    error(e.span.line, e.span.col,
+                    error(e.span,
                           "'~' requires an integer operand");
                 return intTy();
             }
@@ -1561,14 +1681,14 @@ TyP Checker::checkExpr(const ast::Expr& e) {
             if (op == "*") {
                 if (t && (t->is(TyK::Ptr) || t->is(TyK::Ref))) return t->inner;
                 if (!dynish(t))
-                    error(e.span.line, e.span.col,
+                    error(e.span,
                           "cannot dereference non-pointer type " +
                               toString(*t));
                 return unkTy();
             }
             if (op == "spawn") {
                 if (!e.rhs || e.rhs->kind != ExKind::Call)
-                    error(e.span.line, e.span.col,
+                    error(e.span,
                           "spawn expects a function call");
                 if (e.rhs) checkExpr(*e.rhs);
                 return nominalWithArgs(TyK::Struct, "thread", {});
@@ -1598,7 +1718,7 @@ TyP Checker::checkExpr(const ast::Expr& e) {
                 if (!dynish(lt) && !dynish(rt) && !equal(lt, rt) &&
                     !(isNumeric(*lt) && isNumeric(*rt)) &&
                     !assignable(lt, rt) && !assignable(rt, lt))
-                    error(e.span.line, e.span.col,
+                    error(e.span,
                           "comparing incompatible types " + toString(*lt) +
                               " and " + toString(*rt));
                 return boolTy();
@@ -1608,11 +1728,11 @@ TyP Checker::checkExpr(const ast::Expr& e) {
             if (op == "in") {
                 TyP elem = iterableElem(rt);
                 if (elem && elem->isError() && rt && !rt->isError())
-                    error(e.span.line, e.span.col,
+                    error(e.span,
                           "'in' requires an iterable right operand, got " +
                               toString(*rt));
                 else if (!assignable(lt, elem))
-                    error(e.span.line, e.span.col,
+                    error(e.span,
                           "'" + toString(*lt) + "' cannot appear in " +
                               toString(*rt));
                 return boolTy();
@@ -1620,7 +1740,7 @@ TyP Checker::checkExpr(const ast::Expr& e) {
             if (op == "is") {
                 if (e.rhs && e.rhs->kind == ExKind::Ident && e.rhs->text == "none") {
                     if (!dynish(lt) && !lt->is(TyK::Opt))
-                        error(e.span.line, e.span.col,
+                        error(e.span,
                               "'is none' expects an optional, got " +
                                   toString(*lt));
                     return boolTy();
@@ -1652,7 +1772,7 @@ TyP Checker::checkExpr(const ast::Expr& e) {
                 if ((op == "+" || op == "-") && lt->is(TyK::Struct) &&
                     equal(lt, rt))
                     return lt;
-                error(e.span.line, e.span.col,
+                error(e.span,
                       "invalid operands to '" + op + "' (" + toString(*lt) +
                           " and " + toString(*rt) + ")");
                 return errTy();
@@ -1673,12 +1793,12 @@ TyP Checker::checkExpr(const ast::Expr& e) {
                 if (idx->is(TyK::Range) &&
                     equal(argAt(idx, 0), intTy()))
                     return listTy(argAt(obj, 0));
-                error(e.span.line, e.span.col, "list index must be an integer");
+                error(e.span, "list index must be an integer");
                 return errTy();
             }
             if (obj->is(TyK::Dict)) {
                 if (!assignable(idx, argAt(obj, 0)))
-                    error(e.span.line, e.span.col,
+                    error(e.span,
                           "dict key expects " + toString(*argAt(obj, 0)) +
                               ", got " + toString(*idx));
                 return argAt(obj, 1);
@@ -1686,7 +1806,7 @@ TyP Checker::checkExpr(const ast::Expr& e) {
             if (obj->is(TyK::Str)) {
                 if (idx->is(TyK::Int)) return charTy();
                 if (idx->is(TyK::Range)) return strTy();
-                error(e.span.line, e.span.col, "string index must be an integer");
+                error(e.span, "string index must be an integer");
                 return errTy();
             }
             if (obj->is(TyK::Tuple)) {
@@ -1695,7 +1815,7 @@ TyP Checker::checkExpr(const ast::Expr& e) {
                     i = std::stol(e.rhs->text);
                 } catch (...) {}
                 if (i < 0 || static_cast<size_t>(i) >= obj->args.size()) {
-                    error(e.span.line, e.span.col,
+                    error(e.span,
                           "tuple index out of bounds (" + e.rhs->text + ")");
                     return errTy();
                 }
@@ -1705,7 +1825,7 @@ TyP Checker::checkExpr(const ast::Expr& e) {
                 // user-defined index operators (v1): accept, type unknown
                 return unkTy();
             }
-            error(e.span.line, e.span.col,
+            error(e.span,
                   "cannot index a value of type " + toString(*obj));
             return errTy();
         }
@@ -1721,7 +1841,7 @@ TyP Checker::checkExpr(const ast::Expr& e) {
             if (obj->is(TyK::Str)) return strTy();
             if (obj->is(TyK::Gen)) return genTy(argAt(obj, 0));
             if (dynish(obj)) return unkTy();
-            error(e.span.line, e.span.col,
+            error(e.span,
                   "cannot slice a value of type " + toString(*obj));
             return errTy();
         }
@@ -1740,7 +1860,7 @@ TyP Checker::checkExpr(const ast::Expr& e) {
             if (r.get() != t.get() ||
                 (t && t->is(TyK::Struct) && t->name == "result"))
                 return r;
-            error(e.span.line, e.span.col,
+            error(e.span,
                   "postfix '?' expects an optional or result, got " +
                       toString(*t));
             return errTy();
@@ -2167,6 +2287,7 @@ TyP Checker::checkCall(const ast::Expr& e) {
     if (callee->kind == ExKind::Ident) {
         Symbol* sym = scope_->find(callee->text);
         if (sym && sym->kind == SymK::Func) {
+            sym->used = true;
             const std::string& n = sym->name;
             if (builtins_.count(n)) {
                 if (n == "print") {
@@ -2175,7 +2296,7 @@ TyP Checker::checkCall(const ast::Expr& e) {
                 }
                 if (n == "len") {
                     if (e.args.size() != 1) {
-                        error(e.span.line, e.span.col,
+                        error(e.span,
                               "len() takes exactly one argument");
                         return intTy();
                     }
@@ -2191,7 +2312,7 @@ TyP Checker::checkCall(const ast::Expr& e) {
                 }
                 if (n == "sqrt") {
                     if (e.args.size() != 1) {
-                        error(e.span.line, e.span.col,
+                        error(e.span,
                               "sqrt() takes exactly one argument");
                         return floatTy();
                     }
@@ -2223,6 +2344,7 @@ TyP Checker::checkCall(const ast::Expr& e) {
     if (callee->kind == ExKind::Ident) {
         Symbol* sym = scope_->find(callee->text);
         if (sym && sym->kind == SymK::Struct) {
+            sym->used = true;
             std::map<std::string, TyP> fieldTys;
             for (const auto& f : sym->fields) fieldTys[f.first] = f.second;
             for (const auto& a : e.args) {
@@ -2285,7 +2407,7 @@ TyP Checker::checkCall(const ast::Expr& e) {
         return ct->inner ? ct->inner : unkTy();
     }
     if (!dynish(ct)) {
-        error(e.span.line, e.span.col,
+        error(e.span,
               "expression of type " + toString(*ct) + " is not callable");
         return errTy();
     }

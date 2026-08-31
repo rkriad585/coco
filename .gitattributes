@@ -1,0 +1,25 @@
+# Normalize line endings: files are stored as LF in the repo; checkouts use
+# the platform default (CRLF on Windows via core.autocrlf). This keeps diffs
+# clean and avoids "LF will be replaced by CRLF" noise from git.
+* text=auto
+
+*.co    text eol=lf
+*.c     text eol=lf
+*.h     text eol=lf
+*.cpp   text eol=lf
+*.hpp   text eol=lf
+*.md    text eol=lf
+*.txt   text eol=lf
+*.toml  text eol=lf
+*.ebnf  text eol=lf
+*.ps1   text eol=crlf
+*.bat   text eol=crlf
+
+# Binary / never-normalized
+*.exe   binary
+*.cob   binary
+*.cocolib binary
+*.png   binary
+*.jpg   binary
+*.ico   binary
+*.zip   binary

@@ -36,6 +36,10 @@ struct Token {
     Tok kind = Tok::Eof;
     uint32_t line = 1;
     uint32_t col = 1;
+    // Inclusive end extent of the token (start line/col .. end line/col).
+    // Filled by the lexer's production loop; 0 = not yet stamped (legacy).
+    uint32_t endLine = 0;
+    uint32_t endCol = 0;
     std::string text;
 
     bool is(Tok k) const { return kind == k; }

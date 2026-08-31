@@ -15,9 +15,22 @@
 namespace coco {
 namespace sema {
 
+// Lint configuration (PLAN phase 2.5). `allow` suppresses a lint code;
+// `deny` upgrades it to a hard error. Empty sets keep default severity.
+struct LintConfig {
+    std::set<std::string> allow;    // e.g. {"W0105"}
+    std::set<std::string> deny;     // e.g. {"W0101"}
+};
+
 class Checker {
 public:
-    explicit Checker(DiagEngine& diags) : diags_(diags) {}
+    explicit Checker(DiagEngine& diags, const LintConfig* cfg = nullptr)
+        : diags_(diags) {
+        if (cfg) {
+            lintAllow_ = cfg->allow;
+            lintDeny_ = cfg->deny;
+        }
+    }
 
     // Runs collection (2 passes) + body checking. Reports into diags_.
     void checkModule(const std::vector<ast::StmtP>& prog);
@@ -25,6 +38,10 @@ public:
 private:
     // ---- infrastructure ----
     void error(uint32_t line, uint32_t col, const std::string& msg);
+    void error(const ast::Span& s, const std::string& msg);
+    void warning(SpanRange span, const std::string& code,
+                 const std::string& msg);
+    void reportUnused(Scope& s, bool topLevel);
     Scope& push();
     void pop();
 
@@ -99,6 +116,8 @@ private:
     TyP currentRet_;
     int loopDepth_ = 0;
     int quiet_ = 0;   // >0: error() is suppressed (speculative re-walks)
+    std::set<std::string> lintAllow_;
+    std::set<std::string> lintDeny_;
 };
 
 } // namespace sema

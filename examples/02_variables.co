@@ -12,5 +12,5 @@ def main() {
     alias = x; # plain assignment also binds immutably
 
     _ = flag; # discard convention
-    print(MAX_USERS, x, y, z);
+    print(MAX_USERS, x, y, z, alias);
 }

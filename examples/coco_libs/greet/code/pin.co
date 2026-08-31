@@ -1,0 +1,18 @@
+## greet — a tiny package whose initializer is pin.co.
+##
+## pin.co is the package's *public-API aggregator* (Python `__init__`
+## analogue). Importing the package runs pin.co exactly once, then exposes the
+## `pub` surface below on the `greet` module object.
+
+var loads = 0;               # module state: preserved across imports
+loads = loads + 1;           # top-level init statement runs once
+
+## How many times this package was initialized.
+pub def load_count() -> int {
+    return loads;
+}
+
+## A friendly greeting.
+pub def hello(who: string) -> string {
+    return "hello, " + who + "!";
+}

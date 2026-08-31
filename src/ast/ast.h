@@ -19,6 +19,7 @@ using TypeP  = std::unique_ptr<Type>;
 
 struct Span {
     uint32_t line = 0, col = 0;
+    uint32_t endLine = 0, endCol = 0;   // inclusive end; 0 => single-point
 };
 
 // ---- Types ----------------------------------------------------------------

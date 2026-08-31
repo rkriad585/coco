@@ -44,7 +44,16 @@ Token Parser::advance() {
     return t;
 }
 
-ast::Span Parser::spanHere() const { return ast::Span{cur().line, cur().col}; }
+ast::Span Parser::spanHere() const { return spanOf(cur()); }
+
+ast::Span Parser::spanOf(const Token& t) const {
+    ast::Span s{t.line, t.col};
+    if (t.endLine || t.endCol) {
+        s.endLine = t.endLine;
+        s.endCol = t.endCol;
+    }
+    return s;
+}
 
 void Parser::skipNewlines() { while (at(Tok::Newline)) advance(); }
 
@@ -239,7 +248,7 @@ ast::StmtP Parser::parseFuncDef(bool pub, bool allowBody) {
     advance();                                          // def
     auto nameTok = expect(Tok::Ident, "function name");
     s->name = nameTok.text;
-    s->span = ast::Span{nameTok.line, nameTok.col};
+    s->span = spanOf(nameTok);
     if (atPunct("[")) s->typeParams = parseTypeParams();
     s->params = parseParamList();
     if (atOp("->")) { advance(); s->ret = parseType(); }
@@ -376,7 +385,7 @@ ast::StmtP Parser::parseTraitDef() {
             sig.name = nameTok.text;
             sig.params = std::move(params);
             sig.ret = std::move(ret);
-            sig.span = ast::Span{nameTok.line, nameTok.col};
+            sig.span = spanOf(nameTok);
             s->sigs.push_back(std::move(sig));
             expectPunct(";");                           // sigs end with ';'
         }
@@ -410,7 +419,7 @@ ast::StmtP Parser::finishConstDecl() {
     s->target = std::make_unique<ast::Expr>();
     s->target->kind = ast::ExKind::Ident;
     s->target->text = idTok.text;
-    s->target->span = ast::Span{idTok.line, idTok.col};
+    s->target->span = spanOf(idTok);
     if (atPunct(":")) { advance(); s->declType = parseType(); }
     expectOp("=");
     s->value = parseExpr();
@@ -754,7 +763,7 @@ static ast::PatP mkPat(ast::PatKind k, ast::Span s) {
 
 static ast::ExprP litFromToken(const Token& t) {
     auto e = std::make_unique<ast::Expr>();
-    e->span = ast::Span{t.line, t.col};
+    e->span = ast::Span{t.line, t.col, t.endLine, t.endCol};
     switch (t.kind) {
         case Tok::Int:   e->kind = ast::ExKind::Int;   e->text = t.text; break;
         case Tok::Float: e->kind = ast::ExKind::Float; e->text = t.text; break;
@@ -974,7 +983,7 @@ ast::TypeP Parser::parseBaseType() {
             }
             expectPunct("]");
         }
-        return ast::Type::makeName(nameTok.text, ast::Span{nameTok.line, nameTok.col},
+        return ast::Type::makeName(nameTok.text, spanOf(nameTok),
                                    std::move(gens));
     }
     if (atPunct("(")) {
@@ -1013,8 +1022,7 @@ ast::TypeP Parser::parseType() {
     }
     while (atOp("?")) {
         advance();
-        t = ast::Type::makeOptional(std::move(t),
-                                    ast::Span{cur().line, cur().col});
+        t = ast::Type::makeOptional(std::move(t), spanHere());
     }
     return t;
 }
@@ -1451,7 +1459,7 @@ ast::ExprP Parser::parsePrimary() {
             auto e = std::make_unique<ast::Expr>();
             e->kind = t.kind == Tok::Int ? ast::ExKind::Int : ast::ExKind::Float;
             e->text = t.text;
-            e->span = ast::Span{t.line, t.col};
+            e->span = spanOf(t);
             return e;
         }
         case Tok::Char: {
@@ -1459,7 +1467,7 @@ ast::ExprP Parser::parsePrimary() {
             auto e = std::make_unique<ast::Expr>();
             e->kind = ast::ExKind::CharLit;
             e->text = t.text;
-            e->span = ast::Span{t.line, t.col};
+            e->span = spanOf(t);
             return e;
         }
         case Tok::StrNormal:
@@ -1470,7 +1478,7 @@ ast::ExprP Parser::parsePrimary() {
             auto e = std::make_unique<ast::Expr>();
             e->kind = ast::ExKind::Str;
             e->text = t.text;
-            e->span = ast::Span{t.line, t.col};
+            e->span = spanOf(t);
             e->flavor = t.kind == Tok::StrRaw     ? ast::StrFlavor::Raw
                       : t.kind == Tok::StrByte     ? ast::StrFlavor::Byte
                       : t.kind == Tok::StrC        ? ast::StrFlavor::C
@@ -1560,7 +1568,7 @@ ast::ExprP Parser::parsePrimary() {
                 auto e = std::make_unique<ast::Expr>();
                 e->kind = ast::ExKind::Ident;
                 e->text = t.text;
-                e->span = ast::Span{t.line, t.col};
+                e->span = spanOf(t);
                 return e;
             }
             diags_.report(t.line, t.col,
@@ -1571,7 +1579,7 @@ ast::ExprP Parser::parsePrimary() {
         auto e = std::make_unique<ast::Expr>();
         e->kind = ast::ExKind::Ident;
         e->text = t.text;
-        e->span = ast::Span{t.line, t.col};
+        e->span = spanOf(t);
         return e;
     }
 

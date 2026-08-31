@@ -45,6 +45,10 @@ private:
     char peek(size_t off = 0) const;
     bool match(char c);
     void diagHere(std::string msg);
+    // Stamps endLine/endCol on t from the current lexer position (the
+    // position just past the token's last character). Exact for
+    // single-token scans; an inclusive upper bound for multi-token runs.
+    void stampExtent(Token& t);
 
     std::string_view src_;
     std::string filename_;

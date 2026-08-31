@@ -36,6 +36,7 @@ private:
     void syncToStatementEnd();        // after an error: eat until Newline/Dedent
 
     ast::Span spanHere() const;
+    ast::Span spanOf(const Token& t) const;
 
     // ---- declarations & statements ----
     ast::StmtP parseTopOrStmt();

@@ -143,6 +143,14 @@ top_item        = func_def | struct_def | enum_def | trait_def | impl_def
                 | const_decl | var_decl | import_decl | export_decl
                 | statement ;
 
+(* Project-layout conventions (NOT grammar; ratified Phase 3):
+   - main.co   executable entry point: the file whose main() a build/run invokes.
+   - pin.co    package initializer / public-API aggregator (Python __init__):
+               runs exactly once when the package tree is imported, then exposes
+               its pub surface on the package module object. Preferred entry over
+               mod.co / <dirname>.co / a lone *.co inside a package directory.
+   - tests/    <name>_test.co files invoked by `coco test`.                *)
+
 
 (* ---- Imports -------------------------------------------------------------- *)
 

@@ -38,5 +38,7 @@ documented expected output.
 | 28 | weak_references | strong vs weak fields, cycle breaking |
 | 29 | arena_allocation | mem.Arena bulk alloc/reset pattern |
 | 30 | capstone_wordcount | concurrent word-count combining all of the above |
+| 31 | advanced_patterns | ranges, guards, `@` aliases, disjoint or-patterns |
+| 32 | conventions | `main.co` entry + `pin.co` package initializer (run-once) |
 
 **Rule:** any grammar change must be validated against this corpus before merge.

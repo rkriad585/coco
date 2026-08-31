@@ -8,6 +8,9 @@
 #include <vector>
 
 namespace coco {
+
+namespace ast { struct Stmt; }   // forward decl for Symbol::importStmt
+
 namespace sema {
 
 enum class SymK {
@@ -38,6 +41,13 @@ struct Symbol {
     TyP type;                         // value type (Var/Param/Const/EnumVal/...)
     bool mut = false;
     bool pub = false;
+
+    // Lint/use-information (PLAN phase 2). Set during the body-checking pass.
+    bool used = false;                // referenced anywhere as a value
+    bool mutated = false;             // assigned via `=`/aug-assign or `var`
+    uint32_t declLine = 0;
+    uint32_t declCol = 0;
+    const ast::Stmt* importStmt = nullptr;   // ImportRoot -> owning `import`
 
     FuncSig sig;                      // Func
 

@@ -60,6 +60,9 @@ bool readFile(const std::string& path, std::string& out) {
     std::ostringstream ss;
     ss << in.rdbuf();
     out = ss.str();
+    if (out.size() >= 3 && (unsigned char)out[0] == 0xEF &&
+        (unsigned char)out[1] == 0xBB && (unsigned char)out[2] == 0xBF)
+        out.erase(0, 3);   // drop a UTF-8 BOM
     return true;
 }
 
@@ -329,6 +332,19 @@ bool copyTree(const fs::path& from, const fs::path& to) {
 // module/library search paths
 // ---------------------------------------------------------------------------
 
+// Convention-file resolution for a project root (used by `run` and `build`):
+//   coco.toml [package] main -> code/main.co -> main.co -> code/pin.co -> pin.co
+// Returns the relative path to the chosen entry, or "" when none exists.
+std::string resolveEntry(const Manifest& m, const fs::path& dir) {
+    std::string probe;
+    if (!m.main.empty() && fs::is_regular_file(dir / m.main)) return m.main;
+    const char* cands[] = {"code/main.co", "main.co", "code/pin.co",
+                           "pin.co"};
+    for (const char* c : cands)
+        if (fs::is_regular_file(dir / c)) return c;
+    return "";
+}
+
 std::string globalPkgDir() {
     const char* home = std::getenv("USERPROFILE");
     if (!home) home = std::getenv("HOME");
@@ -338,8 +354,14 @@ std::string globalPkgDir() {
 std::vector<std::string> libDirsFor(const std::string& script) {
     std::vector<std::string> dirs;
     if (const char* env = std::getenv("COCO_LIBS")) dirs.push_back(env);
-    size_t p = script.find_last_of("/\\");
-    std::string dir = p == std::string::npos ? "." : script.substr(0, p);
+    // The `script` is either a directory (project root) or a file path whose
+    // parent is the project root. Resolve robustly regardless of trailing
+    // slashes / relative prefixes like "./proj".
+    fs::path sp(script);
+    std::string dir =
+        (script.empty() || script == ".")
+            ? "."
+            : (fs::is_directory(sp) ? script : sp.parent_path().string());
     // type-aware package roots: libs under <base>/libs, apps shimmed into
     // <base>/bin; the bare roots stay for backward compatibility.
     dirs.push_back(dir + "/coco_libs/libs");
@@ -398,9 +420,9 @@ std::vector<coco::ast::StmtP> frontEnd(const std::string& path,
                                        const std::string& src,
                                        coco::DiagEngine& diags) {
     auto toks = coco::Lexer(src, path, diags).lexAll();
-    if (diags.count()) return {};
+    if (diags.errorCount()) return {};
     auto body = coco::Parser(toks, diags).parseProgram();
-    if (diags.count()) return {};
+    if (diags.errorCount()) return {};
     coco::sema::Checker chk(diags);
     chk.checkModule(body);
     return body;
@@ -408,8 +430,13 @@ std::vector<coco::ast::StmtP> frontEnd(const std::string& path,
 
 void printDiags(const std::string& path, const coco::DiagEngine& diags) {
     for (const auto& d : diags.diags())
-        std::cerr << path << ":" << d.line << ":" << d.col
-                  << ": error: " << d.message << "\n";
+        if (d.sev == coco::Sev::Error || d.sev == coco::Sev::InternalError)
+            std::cerr << path << ":" << d.line << ":" << d.col
+                      << ": error: " << d.message << "\n";
+    for (const auto& d : diags.diags())
+        if (d.sev == coco::Sev::Warning || d.sev == coco::Sev::Note)
+            std::cerr << path << ":" << d.line << ":" << d.col
+                      << ": warning[" << d.code << "]: " << d.message << "\n";
 }
 
 // ---- bytecode bundles (.cob): reader ---------------------------------------
@@ -464,10 +491,11 @@ int runProgramSrc(const std::string& label, const std::string& src,
                   const std::map<std::string, std::string>& embedded) {
     coco::DiagEngine diags;
     auto body = frontEnd(label, src, diags);
-    if (diags.count()) {
+    if (diags.errorCount()) {
         printDiags(label, diags);
         return 65;
     }
+    if (diags.warningCount()) printDiags(label, diags);
     coco::ast::Stmt root;
     root.kind = coco::ast::StKind::Pass;
     root.body = std::move(body);
@@ -550,15 +578,21 @@ int cmdNew(const std::string& name, bool lib) {
         ".vscode/\n.idea/\n*.swp\nThumbs.db\n.DS_Store\n";
 
     if (lib) {
-        m.main = "code/" + name + ".co";
+        m.main = "code/pin.co";
         writeManifest(root, m);
 
-        writeFile(root / "code" / (name + ".co"),
+        // pin.co is the package initializer + public-API aggregator. It runs
+        // once when the package is imported and re-exports the package's
+        // `pub` surface (Python __init__ analogue).
+        writeFile(root / "code" / "pin.co",
                   "## " + name + " - a Coco library.\n"
                   "##\n"
-                  "## Doc comments start with '##' and sit directly above a\n"
-                  "## 'pub def'. `coco doc " + name + "` turns them into a\n"
-                  "## browsable API reference.\n\n"
+                  "## This pin.co file is the package's public-API aggregator.\n"
+                  "## It runs once when the package is imported, then the\n"
+                  "## package's `pub` surface is available on the module.\n"
+                  "## Doc comments starting with '##' sit above each `pub`:\n"
+                  "## `coco doc " + name + "` turns them into a browsable API\n"
+                  "## reference.\n\n"
                   "## Say hello to someone.\n"
                   "pub def hello(who: string) -> string {\n"
                   "    return \"hello from " + name + ", \" + who + \"!\";\n}\n\n"
@@ -577,13 +611,14 @@ int cmdNew(const std::string& name, bool lib) {
 
         writeFile(root / "tests" / (name + "_test.co"),
                   "# tests live in tests/ and are named <file>_test.co\n"
-                  "# run them all with:  coco test .\n\n"
-                  "import \"" + name + "\";\n\n"
+                  "# run them all with:  coco test .\n"
+                  "# (import the package's pin.co initializer; installed\n"
+                  "#  consumers import it by name: `import \"" + name + "\"`)\n\n"
+                  "import \"code/pin.co\" as " + name + ";\n\n"
                   "def main() {\n"
-                  "    assert_eq(greet_lib_probe(), 42);\n"
-                  "    print(\"all tests passed\");\n}\n\n"
-                  "def greet_lib_probe() -> int {\n"
-                  "    return 6 * 7;\n}\n");
+                  "    assert_eq(" + name + ".hello(\"no one\"),\n"
+                  "              \"hello from " + name + ", no one!\");\n"
+                  "    print(\"all tests passed\");\n}\n");
 
         writeFile(root / "docs" / "index.md",
                   "# " + name + "\n\n" + m.description +
@@ -608,7 +643,7 @@ int cmdNew(const std::string& name, bool lib) {
 
         std::cout << "created library '" << name << "'\n"
                   << "  " << name << "/coco.toml      manifest\n"
-                  << "  code/" << name << ".co   sources (with ## docs)\n"
+                  << "  code/pin.co   package initializer + pub API\n"
                   << "  tests/          *_test.co files\n"
                   << "  docs/           markdown docs\n"
                   << "next:\n"
@@ -1320,7 +1355,10 @@ int cmdTest(const std::vector<std::string>& args, size_t from) {
         if (!any) return 64;
     }
 
-    auto dirs = libDirsFor("code/main.co");   // project-root relative set
+    // test files live under tests/, but imports resolve from the project root
+    auto dirs = libDirsFor(".");
+    if (std::find(dirs.begin(), dirs.end(), ".") == dirs.end())
+        dirs.push_back(".");
     int pass = 0, fail = 0;
     for (const auto& f : files) {
         std::cout << "test " << f.string() << " ... " << std::flush;
@@ -1735,7 +1773,7 @@ void collectImports(const std::string& path, const std::string& src,
                     std::vector<std::string>& names) {
     coco::DiagEngine diags;
     auto toks = coco::Lexer(src, path, diags).lexAll();
-    if (diags.count()) return;
+    if (diags.errorCount()) return;
     auto body = coco::Parser(toks, diags).parseProgram();
     for (const auto& s : body)
         if (s->kind == coco::ast::StKind::Import &&
@@ -2301,14 +2339,14 @@ int buildProgram(const std::string& name, const std::string& version,
         {
             coco::DiagEngine diags;
             frontEnd(entry, mainSrc, diags);
-            if (diags.count()) {
+            if (diags.errorCount()) {
                 printDiags(entry, diags);
                 return 65;
             }
             auto toks = coco::Lexer(mainSrc, entry, diags).lexAll();
-            if (!diags.count())
+            if (!diags.errorCount())
                 parsed = coco::Parser(toks, diags).parseProgram();
-            if (diags.count()) {
+            if (diags.errorCount()) {
                 printDiags(entry, diags);
                 return 65;
             }
@@ -2382,13 +2420,13 @@ int buildProgram(const std::string& name, const std::string& version,
       << "        return 0;\n"
       << "    }\n"
       << "    coco::DiagEngine diags;\n"
-      << "    auto toks = coco::Lexer(kMainSrc, \"main.co\", diags).lexAll();\n"
-      << "    if (diags.count()) { std::cerr << \"embedded source error\\n\"; "
-         "return 65; }\n"
-      << "    auto body = coco::Parser(toks, diags).parseProgram();\n"
-      << "    if (diags.count()) { return 65; }\n"
-      << "    { coco::sema::Checker chk(diags); chk.checkModule(body); }\n"
-      << "    if (diags.count()) { return 65; }\n"
+<< "    auto toks = coco::Lexer(kMainSrc, \"main.co\", diags).lexAll();\n"
+       << "    if (diags.errorCount()) { std::cerr << \"embedded source error\\n\"; "
+          "return 65; }\n"
+       << "    auto body = coco::Parser(toks, diags).parseProgram();\n"
+       << "    if (diags.errorCount()) { return 65; }\n"
+       << "    { coco::sema::Checker chk(diags); chk.checkModule(body); }\n"
+       << "    if (diags.errorCount()) { return 65; }\n"
       << "    coco::ast::Stmt root;\n"
       << "    root.kind = coco::ast::StKind::Pass;\n"
       << "    root.body = std::move(body);\n"
@@ -2572,7 +2610,7 @@ int packLib(const Manifest& m, const BuildOpts& opts) {
         readFile(it->path().string(), src);
         coco::DiagEngine diags;
         frontEnd(it->path().string(), src, diags);
-        if (diags.count()) {
+        if (diags.errorCount()) {
             printDiags(it->path().string(), diags);
             ++bad;
         }
@@ -2613,7 +2651,15 @@ int packLib(const Manifest& m, const BuildOpts& opts) {
 }
 
 int buildAppShim(const Manifest& m, BuildOpts& opts) {
-    std::string entry = m.main.empty() ? "code/main.co" : m.main;
+    std::string entry = resolveEntry(m, ".");
+    if (entry.empty()) {
+        std::cerr << "coco build: no entry point found in this directory\n"
+                  << "  looked for (in order): coco.toml [package] main, "
+                     "code/main.co, main.co, code/pin.co, pin.co\n"
+                  << "  fix-it: create code/main.co, or run `coco new "
+                     "<name>`\n";
+        return 1;
+    }
     std::string mainSrc;
     if (!readFile(entry, mainSrc)) {
         std::cerr << "coco build: entry '" << entry << "' not found\n";
@@ -2869,7 +2915,18 @@ int main(int argc, char** argv) {
         }
         if (fs::is_directory(file)) {
             Manifest m = readManifest(file);
-            file /= m.main.empty() ? fs::path("code/main.co") : fs::path(m.main);
+            std::string entry = resolveEntry(m, file);
+            if (entry.empty()) {
+                std::cerr
+                    << "coco run: no entry point found in '" << target
+                    << "'\n"
+                    << "  looked for (in order): coco.toml [package] main, "
+                       "code/main.co, main.co, code/pin.co, pin.co\n"
+                    << "  fix-it: create code/main.co, or run `coco new <name>` "
+                       "to scaffold a project\n";
+                return 66;
+            }
+            file /= entry;
         }
         // project root is cwd (or the dir containing the entry)
         std::string scriptDir = fs::is_directory(target)

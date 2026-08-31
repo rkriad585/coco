@@ -41,8 +41,23 @@ struct ThreadImpl {
 struct SignalReturn { Value v; };
 struct SignalBreak { std::string label; };    // empty = unlabeled
 struct SignalContinue { std::string label; };
-struct PanicSignal { std::string msg; };
+struct PanicSignal {
+    std::string msg;
+    std::vector<std::string> frames;    // source-level call stack (outermost first)
+};
 struct SignalRaise { Value errResult; };
+
+extern thread_local std::vector<std::string> g_panicFrames;
+
+// RAII guard recording one source-level call frame for panic backtraces.
+// Pushed at user-function/lambda entry; popped on any exit (incl. exceptions).
+class CallFrameGuard {
+public:
+    CallFrameGuard(std::string name, uint32_t line, uint32_t col);
+    ~CallFrameGuard();
+    CallFrameGuard(const CallFrameGuard&) = delete;
+    CallFrameGuard& operator=(const CallFrameGuard&) = delete;
+};
 
 [[noreturn]] void panicHere(const std::string& msg);
 

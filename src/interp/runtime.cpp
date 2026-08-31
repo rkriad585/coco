@@ -28,7 +28,27 @@ using ast::Param;
 using ast::Pat;
 using ast::Stmt;
 
-void panicHere(const std::string& msg) { throw PanicSignal{msg}; }
+void panicHere(const std::string& msg) {
+    PanicSignal sig;
+    sig.msg = msg;
+    sig.frames = g_panicFrames;
+    throw sig;
+}
+
+thread_local std::vector<std::string> g_panicFrames;
+
+CallFrameGuard::CallFrameGuard(std::string name, uint32_t line, uint32_t col) {
+    std::string frame = "in " + name;
+    if (line) {
+        frame += " (line " + std::to_string(line);
+        if (col) frame += ":" + std::to_string(col);
+        frame += ")";
+    }
+    g_panicFrames.push_back(std::move(frame));
+}
+CallFrameGuard::~CallFrameGuard() {
+    g_panicFrames.pop_back();
+}
 
 // forward decls (defined near the bottom of this file)
 static void mapNamedIntoPos(const std::vector<std::string>& slots,
@@ -377,6 +397,8 @@ Value Interpreter::run() {
     }
     auto it = funcs_.find("main");
     if (it == funcs_.end()) panicHere("no main() defined");
+    CallFrameGuard mainGuard(it->second->name, it->second->span.line,
+                             it->second->span.col);
     Value r = runFunc(it->second, {}, {}, globals_);
     shutdownThreads();
     return r;
@@ -622,7 +644,9 @@ static bool readFileIfExists(const std::string& path, std::string& out) {
 }
 
 // entry-file convention inside an installed package directory:
-//   coco.toml [package] main = "..." -> mod.co -> <dirname>.co -> lone *.co
+//   coco.toml [package] main = "..."
+//     -> pin.co (package initializer / public-API aggregator)
+//     -> mod.co -> <dirname>.co -> lone *.co
 static bool resolvePackageEntry(const std::string& dir, std::string& out) {
     std::string manifest;
     if (readFileIfExists(dir + "/coco.toml", manifest)) {
@@ -635,7 +659,8 @@ static bool resolvePackageEntry(const std::string& dir, std::string& out) {
             return true;
         }
     }
-    const char* defaults[] = {"/mod.co"};
+    const char* defaults[] = {"/pin.co", "/code/pin.co", "/mod.co",
+                              "/code/mod.co"};
     for (const char* d : defaults) {
         std::string probe;
         if (readFileIfExists(dir + d, probe)) {
@@ -716,15 +741,16 @@ Value Interpreter::loadModuleFile(const std::string& dottedRaw) {
     DiagEngine diags;
     auto toks = Lexer(src, found, diags).lexAll();
     std::vector<ast::StmtP> body;
-    if (diags.count() == 0) body = Parser(toks, diags).parseProgram();
-    if (diags.count() == 0) {
+    if (diags.errorCount() == 0) body = Parser(toks, diags).parseProgram();
+    if (diags.errorCount() == 0) {
         sema::Checker chk(diags);
         chk.checkModule(body);
     }
-    if (diags.count() != 0) {
+    if (diags.errorCount() != 0) {
         for (const auto& d : diags.diags())
-            std::cerr << found << ":" << d.line << ":" << d.col
-                      << ": error: " << d.message << "\n";
+            if (d.sev == Sev::Error || d.sev == Sev::InternalError)
+                std::cerr << found << ":" << d.line << ":" << d.col
+                          << ": error: " << d.message << "\n";
         panicHere("module '" + dotted + "' failed to compile");
     }
 
@@ -743,6 +769,7 @@ Value Interpreter::loadModuleFile(const std::string& dottedRaw) {
                 Value v;
                 v.k = VK::Builtin;
                 v.bi = [this, fn, modEnv](std::vector<Value>& a) -> Value {
+                    CallFrameGuard guard(fn->name, fn->span.line, fn->span.col);
                     return runFunc(fn, a, {}, modEnv, nullptr);
                 };
                 modEnv->vars[s.name] = v;
@@ -752,6 +779,11 @@ Value Interpreter::loadModuleFile(const std::string& dottedRaw) {
             case ast::StKind::VarDecl:
                 modEnv->vars[s.target->text] =
                     s.value ? eval(*s.value, modEnv) : Value::none();
+                break;
+            case ast::StKind::Assign:
+            case ast::StKind::AugAssign:
+            case ast::StKind::ExprStmt:
+                exec(s, modEnv);
                 break;
             case ast::StKind::StructDef:
                 structs_[s.name] = &s;
@@ -1423,19 +1455,24 @@ Value Interpreter::eval(const Expr& e, Env env) {
                     }
                     return callValue(*v, std::move(pos), e.span.line, e.span.col);
                 }
-                auto fi = funcs_.find(name);
-                if (fi != funcs_.end())
+auto fi = funcs_.find(name);
+                if (fi != funcs_.end()) {
+                    CallFrameGuard guard(fi->second->name, e.span.line,
+                                         e.span.col);
                     return runFunc(fi->second, std::move(pos), std::move(named),
                                    globals_);
+                }
                 if (structs_.count(name))
                     return makeStruct(name, e.args, env);
                 panicHere("undefined variable '" + name + "'");
             }
 
-            Value cv = eval(*e.lhs, env);
-            if (cv.k == VK::Fn && cv.fn)
+Value cv = eval(*e.lhs, env);
+            if (cv.k == VK::Fn && cv.fn) {
+                CallFrameGuard guard(cv.fn->name, e.span.line, e.span.col);
                 return runFunc(cv.fn, std::move(pos), std::move(named),
                                cv.env ? cv.env : globals_);
+            }
             if (!named.empty() && cv.k == VK::Builtin && !cv.biParams.empty()) {
                 mapNamedIntoPos(cv.biParams, pos, named);
             }
@@ -1745,7 +1782,12 @@ Value Interpreter::callValue(Value callee, std::vector<Value> args, int line,
             }
             return callee.bi(args);
         }
-        case VK::Fn:
+case VK::Fn: {
+            std::string name = callee.lam ? "<lambda>"
+                              : (callee.fn ? callee.fn->name : "?");
+            CallFrameGuard guard(std::move(name),
+                                 line > 0 ? (uint32_t)line : 0,
+                                 col > 0 ? (uint32_t)col : 0);
             if (callee.lam)
                 return runLambda(callee.lam, std::move(args),
                                  callee.env ? callee.env : globals_);
@@ -1753,6 +1795,7 @@ Value Interpreter::callValue(Value callee, std::vector<Value> args, int line,
                 return runFunc(callee.fn, std::move(args), {},
                                callee.env ? callee.env : globals_);
             break;
+        }
         default:
             break;
     }
@@ -1913,10 +1956,11 @@ Value Interpreter::invokeMethod(Value obj, const std::string& name,
         }
         if (!method)
             panicHere("type '" + tn + "' has no method '" + name + "'");
-        std::vector<Value> full;
+std::vector<Value> full;
         full.reserve(1 + pos.size());
         full.push_back(obj);
         for (auto& v : pos) full.push_back(std::move(v));
+        CallFrameGuard guard(method->name, line, col);
         return runFunc(method, std::move(full), std::move(named), globals_,
                        selfOut);
     }
@@ -3511,8 +3555,10 @@ Value Interpreter::spawnCall(const Expr& callExpr, Env env) {
 void Interpreter::threadEntry(Value callee, std::vector<Value> args) {
     try {
         callValue(std::move(callee), std::move(args), 0, 0);
-    } catch (const PanicSignal& p) {
-        fputs(("panic in spawned thread: " + p.msg + "\n").c_str(), stderr);
+} catch (const PanicSignal& p) {
+        std::string msg = "panic in spawned thread: " + p.msg;
+        for (const auto& f : p.frames) msg += "\n  " + f;
+        fputs((msg + "\n").c_str(), stderr);
     } catch (...) {
     }
 }
