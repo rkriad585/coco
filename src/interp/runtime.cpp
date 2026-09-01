@@ -2150,7 +2150,9 @@ Value Interpreter::runFunc(const Stmt* fn, std::vector<Value> pos,
 
     Value ret = Value::none();
     try {
-        if (const vm::VmFunction* vf = vmFuncFor(fn))
+        if (const NativeBody* nb = nativeFuncFor(fn))
+            ret = nativeRunBody(*nb, fenv, fn);
+        else if (const vm::VmFunction* vf = vmFuncFor(fn))
             ret = vmRunBody(*vf, fenv);
         else
             execBlock(fn->body, fenv);
@@ -3953,6 +3955,30 @@ const vm::VmFunction* Interpreter::vmFuncFor(const Stmt* fn) const {
     if ((size_t)it->second >= vmProg_->prog.funcs.size()) return nullptr;
     const vm::VmFunction& vf = vmProg_->prog.funcs[(size_t)it->second];
     return vf.interpreted ? nullptr : &vf;
+}
+
+void Interpreter::enableNative() { nativeEnabled_ = true; }
+
+void Interpreter::registerNative(const Stmt* fn, NativeBody body) {
+    nativeFns_[fn] = std::move(body);
+}
+
+Value Interpreter::nativeEnvVar(const Env& e, const std::string& name) {
+    if (const Value* v = e ? e->find(name) : nullptr) return *v;
+    panicHere("native: unbound variable '" + name + "'");
+}
+
+const Interpreter::NativeBody* Interpreter::nativeFuncFor(const Stmt* fn) const {
+    if (!nativeEnabled_) return nullptr;
+    auto it = nativeFns_.find(fn);
+    return it != nativeFns_.end() ? &it->second : nullptr;
+}
+
+Value Interpreter::nativeRunBody(const NativeBody& nb, Env fenv,
+                                 const Stmt* fn) {
+    Value r = nb(fenv);
+    if (isResultRet(*fn)) return Value::resultOk(std::move(r));
+    return r;
 }
 
 Value Interpreter::makeEnumVPos(const std::string& enumName,

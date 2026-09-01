@@ -43,6 +43,11 @@ add_library(coco_interp STATIC
 )
 target_link_libraries(coco_interp PUBLIC coco_vm)
 
+add_library(coco_backend STATIC
+    src/backend/native.cpp
+)
+target_link_libraries(coco_backend PUBLIC coco_sema)
+
 add_executable(cocolex tools/cocolex.cpp)
 target_link_libraries(cocolex PRIVATE coco_lex)
 
@@ -56,9 +61,9 @@ add_executable(cocorun tools/cocorun.cpp)
 target_link_libraries(cocorun PRIVATE coco_interp)
 
 add_executable(coco tools/coco.cpp)
-target_link_libraries(coco PRIVATE coco_interp ws2_32)
+target_link_libraries(coco PRIVATE coco_interp coco_backend ws2_32)
 
-foreach(tgt coco_lex coco_ast coco_parser coco_sema coco_vm coco_interp)
+foreach(tgt coco_lex coco_ast coco_parser coco_sema coco_vm coco_interp coco_backend)
     if(MSVC)
         target_compile_options(${tgt} PRIVATE /W4 /permissive-)
     else()

@@ -10,6 +10,7 @@
 #include <optional>
 #include <set>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 namespace coco {
@@ -34,6 +35,12 @@ public:
 
     // Runs collection (2 passes) + body checking. Reports into diags_.
     void checkModule(const std::vector<ast::StmtP>& prog);
+
+    // Resolved type of an expression node, as recorded when that node was
+    // type-checked by checkExpr (see typeCache_). Returns unkTy() if the node
+    // was never reached / cached. This is the read-only query a code generation
+    // backend uses to lower statically-typed expressions (PLAN Phase 8.2).
+    TyP typeOf(const ast::Expr& e) const;
 
 private:
     // ---- infrastructure ----
@@ -81,7 +88,11 @@ private:
     void assignTarget(const ast::Expr& tgt, const TyP& vt, bool multi = false);
 
     // ---- expressions ----
+    // checkExpr is the public caching wrapper; the real walk lives in
+    // checkExprImpl. Every expression node visited gets its resolved TyP
+    // recorded in typeCache_ so codegen can query it later.
     TyP checkExpr(const ast::Expr& e);
+    TyP checkExprImpl(const ast::Expr& e);
     TyP checkCall(const ast::Expr& e);
     TyP checkMemberCall(const TyP& recv, const std::string& name,
                         const std::vector<ast::CallArg>& args, uint32_t line,
@@ -118,6 +129,9 @@ private:
     int quiet_ = 0;   // >0: error() is suppressed (speculative re-walks)
     std::set<std::string> lintAllow_;
     std::set<std::string> lintDeny_;
+    // expr node -> resolved TyP, populated by the checkExpr wrapper. Keyed by
+    // node address; safe because AST nodes are stable unique_ptrs.
+    std::unordered_map<const ast::Expr*, TyP> typeCache_;
 };
 
 } // namespace sema

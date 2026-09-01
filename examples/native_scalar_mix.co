@@ -1,0 +1,42 @@
+def is_even(n: int) -> bool {
+    return n % 2 == 0;
+}
+
+def classify(n: int) -> int {
+    if n < 0 {
+        return -1;
+    } elif n == 0 {
+        return 0;
+    } elif n > 100 {
+        return 2;
+    } else {
+        return 1;
+    }
+}
+
+def powf(b: f64, n: int) -> f64 {
+    r: f64 = 1.0;
+    while n > 0 {
+        r = r * b;
+        n -= 1;
+    }
+    return r;
+}
+
+def main() {
+    evens = 0;
+    odds = 0;
+    sum = 0;
+    for i in 0..20 {
+        if is_even(i) {
+            evens += 1;
+        } else {
+            odds += 1;
+        }
+    }
+    for i in -5..=105 {
+        sum += classify(i);
+    }
+    f = powf(2.0, 10);
+    print(evens, odds, sum, f);
+}

@@ -398,13 +398,21 @@ serialization enabled in Phase 5.
   wall + CPU time; a `bench` table preserved across runs for regression detection in CI.
 - Benchmarks wired into `.github/workflows/ci.yml` so perf regressions fail CI.
 
-### 8.2 Optimized AOT (real native codegen, not interpreter-embedded)
-- Today `coco build file.co` compiles the whole interpreter into the binary and evaluates at
-  startup. Add a real codegen path:
-  1. **Low-hanging**: `coco build --release` with `-O2` on the generated C/C++, constant folding,
-     static dicing of `Value` tags where types are statically known (from the checker's `TyP`).
-  2. **Targeted backend**: lower hot, statically-typed functions to C++ (emit a `.cxx` from the
-     AST/bytecode), compile with the resolved GNU toolchain → true native functions, not a VM.
+### 8.2 Optimized AOT (native codegen; `coco build --native`) **~DONE**
+- **Implemented slice 1 (Phase 8.2):** a real scalar backend at `src/backend/native.cpp` lowers
+  statically-typed *scalar* user functions (int/float/bool params & locals, arithmetic, comparison,
+  logical ops, if/elif/else, while, int-range `for`, return, calls to other lowerable fns) to plain
+  C++. `emitNative()` runs during `coco build` (after the checker's type pass), the C++ is embedded
+  in the standalone launcher, and the registration helper wires each lowered function into the
+  interpreter. The runtime dispatch in `runFunc` is **native → VM → tree-walker**, so anything not
+  provably scalar keeps exact interpreter behaviour (the hybrid "VM/native hot paths" architecture).
+- `coco build file.co --native` currently works single-file; `main` stays interpreted (it uses
+  `print`/strings) so programs "just work" while hot scalar functions run as real compiled C++.
+- Measured (fib(0..=30), manual): VM `~17.3 s` → native `~59 ms` ≈ **290× faster**, output identical
+  (`2178308`); corpus green (34/34), native/VM differential green.
+- **Remaining (later slices):** `--release`/`-O2` on the emitted C++, constant folding, lowering
+  `main` itself, strings/lists via native runtime calls, and ASan/UBSan in CI for `--native` builds.
+  §8.2.3's "keep the VM for dynamic/`any`/reflection; hybrid" stance is the plan going forward.
 - Keep the VM for the dynamic/`any`/reflection paths; hybrid "VM + native hot paths" is the
   pragmatic, proven architecture (cf. JIT tiering in the literature).
 
@@ -471,9 +479,13 @@ and multi-archive releases.
   candidate compilers, as today, but made data-driven.
 
 ### 10.2 Cross-platform improvements
-- **Zig as a cross-linker** (proven by cargo-zigbuild/cargo-forge): use `zig cc` to target
-  `windows-arm64`, `linux-arm64`, `darwin-*` from a single host without installing per-target
-  GNU toolchains; fall back to the GNU/PATH-probe path when zig is absent (back-compat).
+- **Zig as a cross-linker — DECISION: abandoned after verification.** Tested zig 0.16.0 linking
+  `aarch64-linux` ELF from a Windows host: it hangs reproducibly (even a tiny `printf` hello for
+  `aarch64-linux-musl`; compile-only works, `x86_64-linux` works, any `-fuse-ld` linkage hangs).
+  Known upstream (codeberg ziglang #31752/#31189/#31210, kaappi #1613). Not Coco's fault; pursue
+  Go-style self-hosting instead (PLAN §15.2, informed by the "self-host trap" warning at
+  `docs/COCO_PLAN.md:844`): **Phase 8.2 native codegen first** (the machinery a self-hosted
+  compiler must own) → then rewrite the frontend. Keep the GNU/PATH-probe fallback (current default).
 - **Static linking** option (`--static`) bundling libc/libcoco → portable single binaries.
 - **`.cob` portable bytecode** already exists as the no-toolchain fallback; keep it as a
   target equal to native.
@@ -488,11 +500,11 @@ and multi-archive releases.
 
 ### Exit criteria
 - `coco build --target=windows-arm64|linux-amd64|darwin-amd64` succeeds from the Windows host
-  using zig (and the existing GNU fallback without zig).
+  using the GNU fallback path (zig was verified and abandoned — see above).
 - `--static`, universal2, and `--install --result build/release` produce the documented
   artifacts + `SHA256SUMS`.
-- CTest runs the full suite; GitHub Actions matrix adds a Linux + macOS job (and a zig-build
-  job) — currently only Windows itself is built in CI.
+- CTest runs the full suite; GitHub Actions matrix adds a Linux + macOS job — currently only
+  Windows itself is built in CI.
 
 ---
 
@@ -616,7 +628,13 @@ validated only under `--release`.
 - Signature/checksum verification on install; private/self-hosted registries.
 
 ### 15.2 Self-hosting start
-- Begin rewriting the **lexer + parser in Coco** against the C++ front-end as oracle
+- **Decision: "native codegen first"** (chosen over a full frontend rewrite). The Phase-8.2
+  scalar backend (`src/backend/native.cpp`) is the first real compiler machinery: it analyzes a
+  checked program and emits C++ for statically-typed scalar functions — exactly what a future
+  self-hosted compiler must own. The frontend rewrite stays later; a compiler that cannot produce
+  fast code from its own source validates the loop (a rewrite-first path is the classic
+  "self-host trap: rewrite forever, ship nothing" — `docs/COCO_PLAN.md:844`).
+- Then begin rewriting the **lexer + parser in Coco** against the C++ front-end as oracle
   (COCO_PLAN §17 Phase 7). The new diagnostics engine and `fmt` make this tractable.
 
 ### 15.3 Docs, tests, CI, releases

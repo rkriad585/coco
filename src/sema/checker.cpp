@@ -1661,7 +1661,18 @@ static bool dynish(const TyP& t) {
     return !t || t->isError() || t->isUnknown() || t->is(TyK::TypeVar);
 }
 
+TyP Checker::typeOf(const ast::Expr& e) const {
+    auto it = typeCache_.find(&e);
+    return it != typeCache_.end() ? it->second : unkTy();
+}
+
 TyP Checker::checkExpr(const ast::Expr& e) {
+    TyP t = checkExprImpl(e);
+    typeCache_[&e] = t;
+    return t;
+}
+
+TyP Checker::checkExprImpl(const ast::Expr& e) {
     switch (e.kind) {
         case ExKind::Int:   return intTy();
         case ExKind::Float: return floatTy();
