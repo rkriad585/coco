@@ -14,6 +14,7 @@
 #include <vector>
 
 #include "interp/value.h"
+#include "vm/compiler.h"
 
 namespace coco {
 
@@ -159,6 +160,18 @@ private:
     void shutdownThreads();
 
 public:
+    // ---- PLAN Phase 4: bytecode VM (vm/compiler.{h,cpp}, runtime.cpp) ------
+    // Enable the bytecode-VM accelerator. After this, any user function whose
+    // body is inside the VM core slice runs on the VM instead of the tree-walker;
+    // all other functions keep their exact tree-walker behaviour.
+    void enableVm();
+    std::unique_ptr<vm::CompileResult> vmProg_;
+    bool vmEnabled_ = false;
+    const vm::VmFunction* vmFuncFor(const Stmt* fn) const;
+    Value vmRunBody(const vm::VmFunction& vf, Env fenv);
+    Value makeEnumVPos(const std::string& enumName, const std::string& variant,
+                       std::vector<Value> pos, Env env);
+
     // entry used by spawned threads
     void threadEntry(Value callee, std::vector<Value> args);
     // directories searched for stdlib modules (dotted imports -> files)

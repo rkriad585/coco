@@ -108,6 +108,10 @@ static bool unpackCob(const std::string& path, std::string& mainSrc,
 }
 
 // shared pipeline: front-end + interpret, with panic handling
+// The bytecode VM is opt-in (--vm). It is verified-correct against the
+// tree-walker and faster (see scripts/bench.ps1), but is NOT the default
+// until it is wired into coco build/executables.
+static bool g_useVm = false;
 static int runSources(const std::string& label, const std::string& src,
                       const std::map<std::string, std::string>* embedded) {
     coco::DiagEngine diags;
@@ -128,6 +132,7 @@ static int runSources(const std::string& label, const std::string& src,
                     if (embedded)
                         for (const auto& [name, esrc] : *embedded)
                             interp.addEmbeddedSource(name, esrc);
+                    if (g_useVm) interp.enableVm();   // PLAN Phase 4 bytecode VM
                     coco::interp::Value r = interp.run();
                     ret = r.k == coco::interp::VK::Int ? (int)r.i : 0;
                 } catch (const coco::interp::PanicSignal& p) {
@@ -167,9 +172,13 @@ int main(int argc, char** argv) {
     for (int i = 1; i < argc; ++i) {
         std::string a = argv[i];
         if (a == "-h" || a == "--help") {
-            std::cout << "usage: cocorun <file.co | file.cob>\n";
+            std::cout << "usage: cocorun [--vm|--no-vm] <file.co | file.cob>\n"
+                         "  (--vm enables the bytecode-VM accelerator; the\n"
+                         "   tree-walker interpreter is the default)\n";
             return 0;
         }
+        if (a == "--vm") { g_useVm = true; continue; }
+        if (a == "--no-vm") { g_useVm = false; continue; }
         if (file.empty()) file = a;
     }
     if (file.empty()) {

@@ -22,6 +22,9 @@
 namespace coco {
 namespace interp {
 
+namespace vm = coco::vm;
+using namespace coco::vm;
+
 using ast::CallArg;
 using ast::Expr;
 using ast::Param;
@@ -2147,7 +2150,10 @@ Value Interpreter::runFunc(const Stmt* fn, std::vector<Value> pos,
 
     Value ret = Value::none();
     try {
-        execBlock(fn->body, fenv);
+        if (const vm::VmFunction* vf = vmFuncFor(fn))
+            ret = vmRunBody(*vf, fenv);
+        else
+            execBlock(fn->body, fenv);
     } catch (SignalReturn& sr) {
         ret = std::move(sr.v);
         runDefers();
@@ -3897,6 +3903,671 @@ void Interpreter::shutdownThreads() {
     }
     for (auto& t : local)
         if (t && t->th.joinable()) t->th.detach();
+}
+
+// ---------------------------------------------------------------------------
+// PLAN Phase 4: bytecode VM (core slice). Defined in this translation unit so
+// it can reuse the anonymous-namespace helpers (normIndex, sliceOf,
+// decodeCharText, lockHeap, typeTestMatches) and evaluate exactly like eval().
+// ---------------------------------------------------------------------------
+
+void Interpreter::enableVm() {
+    if (vmEnabled_) return;
+    if (!program_) panicHere("internal: enableVm without a program");
+    if (!collected_) { collected_ = true; collectProgram(*program_); }
+    const Stmt* mainFn = nullptr;
+    auto it = funcs_.find("main");
+    if (it != funcs_.end()) mainFn = it->second;
+
+    std::unordered_set<std::string> uf;
+    for (const auto& kv : funcs_) uf.insert(kv.first);
+    std::unordered_set<std::string> bi = {
+        "print","len","sqrt","ord","chr","assert","assert_eq","range","panic",
+        "catch_panic","printf","strlen","str","int","float","bool","type","sum",
+        "min","max","any","all","sorted","reversed","enumerate","map","filter",
+        "reduce","upper","lower","trim","contains","starts_with","ends_with",
+        "replace","split","join",
+    };
+    std::unordered_set<std::string> mod = {
+        "math","time","io","mem","json","text","os",
+    };
+    vmProg_ = std::make_unique<vm::CompileResult>(
+        vm::compileProgram(program_->body, mainFn, uf, bi, mod));
+    if (getenv("COCO_VM_DUMP")) {
+        for (size_t i = 0; i < vmProg_->prog.funcs.size(); ++i) {
+            const vm::VmFunction& F = vmProg_->prog.funcs[i];
+            std::cerr << "[vm fn " << i << "] '" << F.name << "' interp="
+                      << F.interpreted << " ins=" << F.code.size() << "\n";
+            for (const auto& I : F.code)
+                std::cerr << "    " << (int)I.op << " a=" << I.a
+                          << " b=" << I.b << " c=" << I.c << "\n";
+        }
+    }
+    vmEnabled_ = true;
+}
+
+const vm::VmFunction* Interpreter::vmFuncFor(const Stmt* fn) const {
+    if (!vmEnabled_ || !vmProg_) return nullptr;
+    auto it = vmProg_->defIdx.find(fn);
+    if (it == vmProg_->defIdx.end()) return nullptr;
+    if ((size_t)it->second >= vmProg_->prog.funcs.size()) return nullptr;
+    const vm::VmFunction& vf = vmProg_->prog.funcs[(size_t)it->second];
+    return vf.interpreted ? nullptr : &vf;
+}
+
+Value Interpreter::makeEnumVPos(const std::string& enumName,
+                                const std::string& variant,
+                                std::vector<Value> pos, Env env) {
+    (void)env;
+    auto ei = enums_.find(enumName);
+    if (ei == enums_.end()) panicHere("unknown enum '" + enumName + "'");
+    const ast::Variant* vd = nullptr;
+    for (const auto& var : ei->second->variants)
+        if (var.name == variant) { vd = &var; break; }
+    if (!vd)
+        panicHere("enum '" + enumName + "' has no variant '" + variant + "'");
+    Value v = Value::enumV(enumName, variant);
+    size_t pi = 0;
+    for (const auto& pd : vd->payload) {
+        if (pi < pos.size()) v.payload.push_back(std::move(pos[pi++]));
+        else
+            panicHere("missing payload '" + pd.name + "' for " + enumName + "." +
+                      variant);
+    }
+    return v;
+}
+
+Value Interpreter::vmRunBody(const vm::VmFunction& vf, Env fenv) {
+    const auto& code = vf.code;
+    const auto& SCC = vf.strConsts;
+    const auto& K = vf.constants;
+
+    // Compact 16-byte VM operand. Hot-path values (None/Bool/Int/Float/Char) are
+    // stored inline; every other kind is boxed on the heap as a full `Value`.
+    // This removes the ~472-byte Value copies that dominated the operand stack.
+    struct VmVal {
+        VK k = VK::None;
+        union { bool b; int64_t i; double d; char32_t ch; Value* box; } u{};
+        VmVal() {}
+        VmVal(const VmVal& o) : k(o.k) {
+            if (k == VK::None) { /* nothing */ }
+            else if (k == VK::Bool) u.b = o.u.b;
+            else if (k == VK::Int) u.i = o.u.i;
+            else if (k == VK::Float) u.d = o.u.d;
+            else if (k == VK::Char) u.ch = o.u.ch;
+            else u.box = new Value(*o.u.box);
+        }
+        VmVal(VmVal&& o) noexcept : k(o.k) {
+            if (k == VK::None) { /* nothing */ }
+            else if (k == VK::Bool) u.b = o.u.b;
+            else if (k == VK::Int) u.i = o.u.i;
+            else if (k == VK::Float) u.d = o.u.d;
+            else if (k == VK::Char) u.ch = o.u.ch;
+            else u.box = o.u.box;
+            o.k = VK::None;
+        }
+        VmVal& operator=(const VmVal& o) {
+            if (this == &o) return *this;
+            if (k != VK::None && k != VK::Bool && k != VK::Int &&
+                k != VK::Float && k != VK::Char) delete u.box;
+            k = o.k;
+            if (k == VK::None) { /* nothing */ }
+            else if (k == VK::Bool) u.b = o.u.b;
+            else if (k == VK::Int) u.i = o.u.i;
+            else if (k == VK::Float) u.d = o.u.d;
+            else if (k == VK::Char) u.ch = o.u.ch;
+            else u.box = new Value(*o.u.box);
+            return *this;
+        }
+        VmVal& operator=(VmVal&& o) noexcept {
+            if (this == &o) return *this;
+            if (k != VK::None && k != VK::Bool && k != VK::Int &&
+                k != VK::Float && k != VK::Char) delete u.box;
+            k = o.k;
+            if (k == VK::None) { /* nothing */ }
+            else if (k == VK::Bool) u.b = o.u.b;
+            else if (k == VK::Int) u.i = o.u.i;
+            else if (k == VK::Float) u.d = o.u.d;
+            else if (k == VK::Char) u.ch = o.u.ch;
+            else u.box = o.u.box;
+            o.k = VK::None;
+            return *this;
+        }
+        ~VmVal() {
+            if (k != VK::None && k != VK::Bool && k != VK::Int &&
+                k != VK::Float && k != VK::Char) delete u.box;
+        }
+        bool isScalar() const {
+            return k == VK::None || k == VK::Bool || k == VK::Int ||
+                   k == VK::Float || k == VK::Char;
+        }
+        Value take() {   // consume: return full Value, leave None
+            if (k == VK::None) { return Value::none(); }
+            if (k == VK::Bool) { Value v = Value::boolean(u.b); k = VK::None; return v; }
+            if (k == VK::Int)  { Value v = Value::integer(u.i); k = VK::None; return v; }
+            if (k == VK::Float){ Value v = Value::floating(u.d); k = VK::None; return v; }
+            if (k == VK::Char) { Value v = Value::chr(u.ch);    k = VK::None; return v; }
+            Value v = std::move(*u.box);
+            k = VK::None;
+            delete u.box;
+            return v;
+        }
+    };
+    auto mkScalar = [](VK kk, int64_t i, double d, bool b, char32_t ch) -> VmVal {
+        VmVal v; v.k = kk;
+        if (kk == VK::Bool) v.u.b = b; else if (kk == VK::Float) v.u.d = d;
+        else if (kk == VK::Char) v.u.ch = ch; else v.u.i = i;
+        return v;
+    };
+    auto mkBox = [](Value&& x) -> VmVal {   // box a non-scalar value
+        VmVal v; v.k = x.k; v.u.box = new Value(std::move(x)); return v;
+    };
+    // Lift a full Value into a VmVal (inline if scalar, else box).
+    auto fromVal = [&mkScalar, &mkBox](Value&& x) -> VmVal {
+        switch (x.k) {
+            case VK::None: return VmVal();
+            case VK::Bool: return mkScalar(VK::Bool, 0, 0, x.b, 0);
+            case VK::Int:  return mkScalar(VK::Int, x.i, 0, false, 0);
+            case VK::Float:return mkScalar(VK::Float, 0, x.d, false, 0);
+            case VK::Char: return mkScalar(VK::Char, 0, 0, false, x.ch);
+            default:       return mkBox(std::move(x));
+        }
+    };
+
+    std::vector<VmVal> st;
+    struct VmIter {
+        enum Kind { Vec, Range } kind = Vec;
+        std::vector<Value> vec;   // Vec mode: materialized elements
+        size_t idx = 0;           // Vec mode: next read position
+        int64_t cur = 0, end = 0; // Range mode: next value / exclusive end
+    };
+    std::vector<VmIter> iters;
+    size_t pc = 0;
+    Env env = fenv;
+    st.reserve(64);
+    // Frame-level slot storage. Params are bound into fenv by runFunc before
+    // entering here; preload them so OP_LOAD_LOCAL/OP_STORE_LOCAL hit locals[].
+    std::vector<VmVal> locals;
+    if (vf.useSlots) {
+        locals.resize(vf.slotNames.size());
+        for (size_t i = 0; i < vf.slotNames.size(); ++i) {
+            auto it = fenv->vars.find(vf.slotNames[i]);
+            if (it != fenv->vars.end()) locals[i] = fromVal(std::move(it->second));
+        }
+    }
+
+    auto pop = [&]() -> VmVal {
+        VmVal v = std::move(st.back());
+        st.pop_back();
+        return v;
+    };
+    auto push = [&](VmVal v) { st.push_back(std::move(v)); };
+    // Compiler emits relative offsets measured from the jump instruction's own
+    // index (a = target - here()). The dispatch loop has already advanced `pc`
+    // past it (code[pc++]), so subtract one to land exactly on the target.
+    auto jmp = [&](int32_t off) { pc = (size_t)((int64_t)pc + (int64_t)off - 1); };
+
+    while (pc < code.size()) {
+        const Ins& ins = code[pc++];
+        switch (ins.op) {
+            case OP_NONEZ: push(VmVal()); break;
+            case OP_TRUE: push(mkScalar(VK::Bool, 0, 0, true, 0)); break;
+            case OP_FALSE: push(mkScalar(VK::Bool, 0, 0, false, 0)); break;
+            case OP_BOOL: { VmVal v = pop(); Value fv = v.take(); push(fromVal(Value::boolean(truthy(fv)))); break; }
+            case OP_PUSH_CONST_STR: push(fromVal(Value::str(SCC[(size_t)ins.a]))); break;
+            case OP_INT: case OP_FLOAT: case OP_CHAR:
+            case OP_STR: case OP_STR_RAW: case OP_STR_BYTES: case OP_STR_C:
+                push(fromVal(Value(K[(size_t)ins.a]))); break;
+
+            case OP_LOAD_LOCAL: push(locals[(size_t)ins.a]); break;
+
+            case OP_LOAD: {
+                const std::string& n = SCC[(size_t)ins.a];
+                if (const Value* v = env->find(n)) { push(fromVal(Value(*v))); break; }
+                auto fi = funcs_.find(n);
+                if (fi != funcs_.end()) {
+                    Value f; f.k = VK::Fn; f.fn = fi->second; f.env = globals_;
+                    push(mkBox(std::move(f))); break;
+                }
+                if (structs_.count(n)) {
+                    Value m; m.k = VK::Module; m.typeName = "__struct__:" + n;
+                    push(mkBox(std::move(m))); break;
+                }
+                if (enums_.count(n)) {
+                    Value m; m.k = VK::Module; m.typeName = "__enum__:" + n;
+                    push(mkBox(std::move(m))); break;
+                }
+                panicHere("undefined variable '" + n + "'");
+                break;
+            }
+
+            case OP_STORE: {
+                const std::string& n = SCC[(size_t)ins.a];
+                Value v = pop().take();
+                if (Value* r = env->findRef(n)) *r = std::move(v);
+                else env->vars[n] = std::move(v);
+                break;
+            }
+
+            case OP_STORE_LOCAL: locals[(size_t)ins.a] = pop(); break;
+
+            case OP_UNARY: {
+                const std::string& op = SCC[(size_t)ins.a];
+                VmVal v = pop();
+                if (v.k == VK::Int || v.k == VK::Float) {
+                    if (op == "-") { if (v.k==VK::Int) v.u.i=-v.u.i; else v.u.d=-v.u.d; push(v); break; }
+                    if (op == "+") { push(v); break; }
+                    if (op == "~" ) { if (v.k==VK::Int) { v.u.i = ~v.u.i; push(v); break; } }
+                    if (op == "not") { push(fromVal(Value::boolean(v.k!=VK::Int ? (v.u.d!=0.0) : (v.u.i!=0)))); break; }
+                } else if (op == "not") {
+                    Value ft = pop().take();  // consume dv (was 'v'? v already popped) -> use truthy
+                    push(fromVal(Value::boolean(!truthy(ft)))); break;
+                }
+                if (op == "-" || op == "+" || op == "~") panicHere("unary operator expects a number");
+                if (op == "&" || op == "*") { push(v); break; }
+                panicHere("unknown unary operator '" + op + "'");
+                break;
+            }
+
+            case OP_UNARANGE: {
+                VmVal lo = pop();
+                VmVal r; r.k = VK::Range; r.u.box = new Value(Value::rangeV(lo.u.i, -1, false));
+                push(r);
+                break;
+            }
+
+            case OP_BINARY: {
+                const std::string& op = SCC[(size_t)ins.a];
+                VmVal r = pop();
+                VmVal l = pop();
+                if (op == ".." || op == "..=") {
+                    push(fromVal(Value::rangeV(l.u.i, r.u.i, op == "..=")));
+                    break;
+                }
+                // Fast scalar path: int/float arithmetic and comparisons done
+                // entirely on unboxed values, avoiding any Value construction.
+                if (l.isScalar() && r.isScalar() &&
+                    (l.k == VK::Int || l.k == VK::Float) &&
+                    (r.k == VK::Int || r.k == VK::Float)) {
+                    if (op == "<" || op == "<=" || op == ">" || op == ">=") {
+                        bool res;
+                        if (l.k == VK::Float || r.k == VK::Float) {
+                            double a = l.k==VK::Float?l.u.d:(double)l.u.i;
+                            double b = r.k==VK::Float?r.u.d:(double)r.u.i;
+                            if (op=="<") res = a<b; else if (op=="<=") res=a<=b;
+                            else if (op==">") res = a>b; else res = a>=b;
+                        } else {
+                            int64_t a=l.u.i, b=r.u.i;
+                            if (op=="<") res=a<b; else if (op=="<=") res=a<=b;
+                            else if (op==">") res=a>b; else res=a>=b;
+                        }
+                        push(mkScalar(VK::Bool,0,0,res,0)); break;
+                    }
+                    if (op == "+") {
+                        if (l.k==VK::Float||r.k==VK::Float) push(mkScalar(VK::Float,0,(l.k==VK::Float?l.u.d:(double)l.u.i)+(r.k==VK::Float?r.u.d:(double)r.u.i),false,0));
+                        else push(mkScalar(VK::Int,l.u.i+r.u.i,0,false,0));
+                        break;
+                    }
+                    if (op == "-") {
+                        if (l.k==VK::Float||r.k==VK::Float) push(mkScalar(VK::Float,0,(l.k==VK::Float?l.u.d:(double)l.u.i)-(r.k==VK::Float?r.u.d:(double)r.u.i),false,0));
+                        else push(mkScalar(VK::Int,l.u.i-r.u.i,0,false,0));
+                        break;
+                    }
+                    if (op == "*") {
+                        if (l.k==VK::Float||r.k==VK::Float) push(mkScalar(VK::Float,0,(l.k==VK::Float?l.u.d:(double)l.u.i)*(r.k==VK::Float?r.u.d:(double)r.u.i),false,0));
+                        else push(mkScalar(VK::Int,l.u.i*r.u.i,0,false,0));
+                        break;
+                    }
+                    if (op == "/") {
+                        double a = l.k==VK::Float?l.u.d:(double)l.u.i;
+                        double b = r.k==VK::Float?r.u.d:(double)r.u.i;
+                        push(mkScalar(VK::Float,0,a/b,false,0)); break;
+                    }
+                    if (op == "%" || op == "mod") {
+                        if (l.k==VK::Float||r.k==VK::Float) {
+                            double a=l.k==VK::Float?l.u.d:(double)l.u.i, b=r.k==VK::Float?r.u.d:(double)r.u.i;
+                            push(mkScalar(VK::Float,0,std::fmod(a,b),false,0));
+                        } else { push(mkScalar(VK::Int,l.u.i%r.u.i,0,false,0)); }
+                        break;
+                    }
+                    if (op == "==") {
+                        bool res;
+                        if (l.k==VK::Float||r.k==VK::Float) res = (l.k==VK::Float?l.u.d:(double)l.u.i)==(r.k==VK::Float?r.u.d:(double)r.u.i);
+                        else res = l.u.i==r.u.i;
+                        push(mkScalar(VK::Bool,0,0,res,0)); break;
+                    }
+                    if (op == "!=") {
+                        bool res;
+                        if (l.k==VK::Float||r.k==VK::Float) res = (l.k==VK::Float?l.u.d:(double)l.u.i)!=(r.k==VK::Float?r.u.d:(double)r.u.i);
+                        else res = l.u.i!=r.u.i;
+                        push(mkScalar(VK::Bool,0,0,res,0)); break;
+                    }
+                    if (op == "**" || op == "pow") {
+                        double a=l.k==VK::Float?l.u.d:(double)l.u.i, b=r.k==VK::Float?r.u.d:(double)r.u.i;
+                        push(mkScalar(VK::Float,0,std::pow(a,b),false,0)); break;
+                    }
+                }
+                Value lv = l.take();
+                Value rv = r.take();
+                if (op == "<" || op == "<=" || op == ">" || op == ">=")
+                    push(fromVal(compareOne(op, lv, rv)));
+                else {
+                    // NaN-compatible compare for == is handled by binop
+                    push(fromVal(binop(op, lv, rv, 0, 0)));
+                }
+                break;
+            }
+
+            case OP_IS: {
+                VmVal l = pop();
+                if (ins.a < 0) push(mkScalar(VK::Bool,0,0,l.k == VK::None,0));
+                else { Value lv = l.take(); push(fromVal(Value::boolean(typeTestMatches(lv, SCC[(size_t)ins.a])))); }
+                break;
+            }
+
+            case OP_IN: {
+                Value rv = pop().take();
+                Value lv = pop().take();
+                switch (rv.k) {
+                    case VK::List: case VK::Set: case VK::Tuple: {
+                        bool found = false;
+                        for (const auto& el : *rv.vec)
+                            if (valuesEqual(lv, el)) { found = true; break; }
+                        push(fromVal(Value::boolean(found)));
+                        break;
+                    }
+                    case VK::Dict: {
+                        bool found = false;
+                        for (const auto& kv : *rv.map)
+                            if (valuesEqual(lv, kv.first)) { found = true; break; }
+                        push(fromVal(Value::boolean(found)));
+                        break;
+                    }
+                    case VK::Str: {
+                        if (lv.k != VK::Str)
+                            panicHere("'in' on strings needs a string needle");
+                        push(fromVal(Value::boolean(
+                            rv.s.find(lv.s) != std::string::npos)));
+                        break;
+                    }
+                    case VK::Range:
+                        push(fromVal(Value::boolean(lv.i >= rv.lo &&
+                            (rv.inclusive ? lv.i <= rv.hi : lv.i < rv.hi))));
+                        break;
+                    default:
+                        panicHere("'in' unsupported operand");
+                }
+                break;
+            }
+
+            case OP_MAKE_LIST: case OP_MAKE_SET: case OP_MAKE_TUPLE: {
+                std::vector<Value> vs((size_t)ins.a);
+                for (int32_t i = ins.a - 1; i >= 0; --i) vs[(size_t)i] = pop().take();
+                if (ins.op == OP_MAKE_LIST) push(fromVal(Value::list(std::move(vs))));
+                else if (ins.op == OP_MAKE_SET) push(fromVal(Value::set(std::move(vs))));
+                else push(fromVal(Value::tuple(std::move(vs))));
+                break;
+            }
+
+            case OP_MAKE_DICT: {
+                Value d = Value::dict();
+                for (int32_t i = 0; i < ins.a; ++i) {
+                    Value val = pop().take();
+                    Value key = pop().take();
+                    d.map->emplace_back(std::move(key), std::move(val));
+                }
+                push(fromVal(std::move(d)));
+                break;
+            }
+
+            case OP_INDEX: {
+                Value idx = pop().take();
+                Value obj = pop().take();
+                if (obj.k == VK::Weak) obj = lockHeap(obj);
+                switch (obj.k) {
+                    case VK::List: case VK::Tuple:
+                        push(fromVal(Value((*obj.vec)[normIndex((int64_t)obj.vec->size(), idx.i)])));
+                        break;
+                    case VK::Dict: {
+                        bool hit = false; Value rv;
+                        for (const auto& kv : *obj.map)
+                            if (valuesEqual(kv.first, idx)) { rv = kv.second; hit = true; break; }
+                        if (!hit) panicHere("dict key not found");
+                        push(fromVal(std::move(rv)));
+                        break;
+                    }
+                    case VK::Str: case VK::Bytes: {
+                        size_t n = normIndex((int64_t)obj.s.size(), idx.i);
+                        if (obj.k == VK::Bytes)
+                            push(fromVal(Value::integer((unsigned char)obj.s[n])));
+                        else
+                            push(fromVal(Value::chr(decodeCharText(obj.s.substr(n, 1)))));
+                        break;
+                    }
+                    default:
+                        if (obj.k == VK::Struct || obj.k == VK::Heap)
+                            push(fromVal(invokeMethod(obj, "index", {idx}, {}, env, 0, 0, nullptr)));
+                        else
+                            panicHere("value is not indexable");
+                        break;
+                }
+                break;
+            }
+
+            case OP_SLICE: {
+                Value hi = pop().take();
+                Value lo = pop().take();
+                Value obj = pop().take();
+                if (obj.k == VK::Weak) obj = lockHeap(obj);
+                push(fromVal(sliceOf(obj, lo.i, hi.i, ins.a != 0, 1)));
+                break;
+            }
+            case OP_SLICE3: {
+                Value step = pop().take();
+                Value hi = pop().take();
+                Value lo = pop().take();
+                Value obj = pop().take();
+                if (obj.k == VK::Weak) obj = lockHeap(obj);
+                push(fromVal(sliceOf(obj, lo.i, hi.i, false, step.i)));
+                break;
+            }
+
+            case OP_MEMBER: {
+                const std::string& name = SCC[(size_t)ins.a];
+                Value recv = pop().take();
+                if (recv.k == VK::Weak) recv = lockHeap(recv);
+                if (recv.isNone() && ins.b) { push(VmVal()); break; }
+                if (recv.k == VK::Module &&
+                    recv.typeName.rfind("__enum__:", 0) == 0) {
+                    push(fromVal(makeEnumVPos(recv.typeName.substr(9), name, {}, env)));
+                    break;
+                }
+                push(fromVal(memberRead(recv, name, 0, 0)));
+                break;
+            }
+
+            case OP_MEMBER_METHOD: {
+                const std::string& name = SCC[(size_t)ins.a];
+                std::vector<Value> args((size_t)ins.b);
+                for (int32_t i = ins.b - 1; i >= 0; --i) args[(size_t)i] = pop().take();
+                Value recv = pop().take();
+                if (recv.k == VK::Weak) recv = lockHeap(recv);
+                if (recv.isNone() && ins.c) { push(VmVal()); break; }
+                if (recv.k == VK::Module &&
+                    recv.typeName.rfind("__enum__:", 0) == 0) {
+                    push(fromVal(makeEnumVPos(recv.typeName.substr(9), name,
+                                       std::move(args), env)));
+                    break;
+                }
+                push(fromVal(invokeMethod(std::move(recv), name, std::move(args), {},
+                                   env, 0, 0, nullptr)));
+                break;
+            }
+
+            case OP_CALL_NAME: {
+                const std::string& n = SCC[(size_t)ins.a];
+                std::vector<Value> args((size_t)ins.b);
+                for (int32_t i = ins.b - 1; i >= 0; --i) args[(size_t)i] = pop().take();
+                Value callee;
+                if (const Value* v = env->find(n)) callee = *v;
+                else if (funcs_.count(n)) {
+                    callee.k = VK::Fn;
+                    callee.fn = funcs_[n];
+                    callee.env = globals_;
+                } else {
+                    panicHere("undefined function '" + n + "'");
+                }
+                push(fromVal(callValue(std::move(callee), std::move(args), 0, 0)));
+                break;
+            }
+
+            case OP_CALL: {
+                std::vector<Value> args((size_t)ins.a);
+                for (int32_t i = ins.a - 1; i >= 0; --i) args[(size_t)i] = pop().take();
+                Value callee = pop().take();
+                push(fromVal(callValue(std::move(callee), std::move(args), 0, 0)));
+                break;
+            }
+
+            case OP_TRY: {
+                VmVal v = pop();
+                if (v.k == VK::Result) {
+                    Value fv = v.take();
+                    if (fv.variant == "err") throw SignalRaise{std::move(fv)};
+                    push(fromVal(Value(fv.payload[0])));
+                } else push(std::move(v));
+                break;
+            }
+
+            case OP_JUMP: jmp(ins.a); break;
+            case OP_JUMP_IF_FALSE: {
+                VmVal c = pop();
+                bool t;
+                if (c.k == VK::None) t = false;
+                else if (c.k == VK::Bool) t = c.u.b;
+                else if (c.k == VK::Int) t = c.u.i != 0;
+                else if (c.k == VK::Float) t = c.u.d != 0.0;
+                else { Value fv = c.take(); t = truthy(fv); }
+                if (!t) jmp(ins.a);
+                break;
+            }
+            case OP_JUMP_IF_TRUE: {
+                VmVal c = pop();
+                bool t;
+                if (c.k == VK::None) t = false;
+                else if (c.k == VK::Bool) t = c.u.b;
+                else if (c.k == VK::Int) t = c.u.i != 0;
+                else if (c.k == VK::Float) t = c.u.d != 0.0;
+                else { Value fv = c.take(); t = truthy(fv); }
+                if (t) jmp(ins.a);
+                break;
+            }
+
+            case OP_SCOPE_ENTER: env = makeChild(env); break;
+            case OP_SCOPE_LEAVE: env = env->parent; break;
+
+            case OP_EXPR: pop(); break;
+
+            case OP_ITER_BEGIN: {
+                Value seq = pop().take();
+                VmIter it;
+                if (seq.k == VK::Range) {
+                    // Stream ranges (like the tree-walker) instead of
+                    // materialising: for `0..n` this avoids a giant Vector.
+                    int64_t h = seq.hi < 0 ? 9007199254740992LL : seq.hi;
+                    it.kind = VmIter::Range;
+                    it.cur = seq.lo;
+                    it.end = seq.inclusive ? h + 1 : h;
+                    iters.push_back(std::move(it));
+                    break;
+                }
+                std::vector<Value> items;
+                switch (seq.k) {
+                    case VK::List: case VK::Set: case VK::Tuple:
+                        items = *seq.vec;
+                        break;
+                    case VK::Dict:
+                        for (const auto& kv : *seq.map) items.push_back(kv.first);
+                        break;
+                    case VK::Str:
+                        for (char c : seq.s)
+                            items.push_back(Value::chr((char32_t)(unsigned char)c));
+                        break;
+                    case VK::Bytes:
+                        for (char c : seq.s)
+                            items.push_back(Value::integer((int64_t)(unsigned char)c));
+                        break;
+                    case VK::Chan: {
+                        for (;;) {
+                            auto s = seq.chan->recv();
+                            if (!s.got) break;
+                            items.push_back(std::move(s.v));
+                        }
+                        break;
+                    }
+                    case VK::Struct: case VK::Heap: {
+                        Value selfCopy = seq;
+                        for (;;) {
+                            Value nv = invokeMethod(selfCopy, "next", {}, {}, env,
+                                                    0, 0, &selfCopy);
+                            if (nv.isNone()) break;
+                            items.push_back(nv);
+                        }
+                        break;
+                    }
+                    default:
+                        panicHere("value is not iterable");
+                }
+                it.kind = VmIter::Vec;
+                it.vec = std::move(items);
+                it.idx = 0;
+                iters.push_back(std::move(it));
+                break;
+            }
+
+            case OP_ITER_NEXT: {
+                auto& it = iters.back();
+                if (it.kind == VmIter::Range) {
+                    if (it.cur < it.end) {
+                        push(mkScalar(VK::Int, it.cur++, 0, false, 0)); // value first
+                        push(mkScalar(VK::Bool,0,0,true,0));            // hasNext on top
+                    } else {
+                        push(mkScalar(VK::Bool,0,0,false,0));
+                    }
+                } else {
+                    if (it.idx < it.vec.size()) {
+                        push(fromVal(std::move(it.vec[it.idx++])));
+                        push(mkScalar(VK::Bool,0,0,true,0));
+                    } else {
+                        push(mkScalar(VK::Bool,0,0,false,0));
+                    }
+                }
+                break;
+            }
+
+            case OP_ITER_VALUE_VAR: {
+                const std::string& n = SCC[(size_t)ins.a];
+                Value v = pop().take();
+                env->vars[n] = std::move(v);
+                break;
+            }
+
+            case OP_ITER_VALUE_LOCAL:
+                locals[(size_t)ins.a] = pop();
+                break;
+
+            case OP_ITER_END: iters.pop_back(); break;
+
+            case OP_RETURN: return pop().take();
+            case OP_RETURN_NONE: return Value::none();
+
+            case OP_HALT:
+            default:
+                panicHere("internal: unexpected VM opcode");
+                break;
+        }
+    }
+    return Value::none();
 }
 
 } // namespace interp

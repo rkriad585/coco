@@ -242,6 +242,27 @@ authoritative correctness model.
   target so `coco check`, `coco lint`, tooling all operate on one tree.
 - `coco build -B` (bytecode bundle `.cob`) already exists — make the VM the runtime for `.cob`.
 
+### 4.4 Verified status (compact VmVal landed)
+- The core-slice VM is **correct** (32/32 deterministic differential match; 33/33 corpus; 8/8
+  negatives; 7/7 conventions, in both Debug and Release; ASan-clean under the VM). It is opt-in
+  via `--vm`.
+- **Slot-based locals** are implemented: frame-level and loop-var names are assigned compile-time
+  integer slots and accessed via `OP_LOAD_LOCAL`/`OP_STORE_LOCAL`/`OP_ITER_VALUE_LOCAL` (flat
+  `Value[]` per call) instead of `env->find` string hashing. A depth-aware shadow guard falls back
+  to the exact env path whenever a slot name would be shadowed, preserving semantics.
+- **Compact `VmVal` (Phase 4 bytecode-VM fix, research-backed):** the operand stack and frame
+  locals in `vmRunBody` now use a local ~16-byte tagged `VmVal` (`VK` + inline int/float/bool/char
+  + heap `Value*` box for compound values). This eliminates shuffling the 472-byte shared `Value`
+  through the VM per op — the root cause of the loop gap. The authoritative tree-walker `Value`
+  (472 bytes) is unchanged on the user-facing API.
+- **Honest perf result (Release, measured, best-of-3):** the VM is now **faster than the
+  tree-walker on every workload**:
+  - `for i in 0..n` arithmetic loop: ratio ≈ 0.53 ⇒ ~1.9× faster (was ~1.35× slower).
+  - `while` arithmetic loop: ratio ≈ 0.68 ⇒ ~1.5× faster (was ~1.8× slower).
+  - fib(25) call bench: ratio ≈ 0.27 ⇒ ~3.7× faster (was ~0.4, ~2.5× faster).
+  The compact operands turned the previously dispatch-bound arithmetic loops from negative to
+  clearly positive. `--vm` remains opt-in (off by default) pending wiring into `coco build`.
+
 ### Exit criteria
 - `svm` differential test: thousands of randomized programs produce identical output in
   tree-walker vs VM.
