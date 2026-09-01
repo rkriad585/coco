@@ -3,3 +3,4 @@ _site/
 *.obj
 *.pdb
 build-asan/
+build-rel/
