@@ -1814,7 +1814,6 @@ struct BuildOpts {
     bool wantLib = false;
     bool sasm = false;       // -S  human-readable assembly listing (.sasm)
     bool obj = false;        // -O  native object file (.obj + .lib via lib.exe)
-    bool bytecode = false;   // -B  portable bytecode bundle (.cob)
     bool singleFile = false; // `coco build file.co` (Go-style, no manifest)
     std::string target;      // --target=<os>-<arch>; empty -> $COCO_TARGET -> host
     std::string outPath;     // -o <path> (Go build -o)
@@ -2287,7 +2286,7 @@ std::string emitSasm(const std::string& srcPath,
     return em.out.str();
 }
 
-// ---- -B: portable bytecode bundle (.cob) ------------------------------------
+// ---- portable bytecode bundle (.cob) ---------------------------------------
 // Layout: magic "COCOB" + u8 version(1) + u32 count, then per entry:
 //   u32 nameLen | name bytes | u32 srcLen | utf8 source bytes
 
@@ -2361,25 +2360,22 @@ int buildProgram(const std::string& name, const std::string& version,
         return 0;
     }
 
-    if (opts.bytecode || (!isHost && crossCxx.empty())) {
+    if (!isHost && crossCxx.empty()) {
+        // No cross toolchain for this target: fall back to a portable bytecode
+        // bundle (.cob) that cocorun can run, instead of a native binary.
         const std::string base = opts.outPath.empty() ? (outDir / name).generic_string() : opts.outPath;
         const std::string out =
             opts.outPath.empty() && !opts.defaultOut.empty()
                 ? opts.defaultOut + ".cob"
                 : base + ".cob";
         writeFile(out, emitCob(mainSrc, embedded));
-        if (opts.bytecode && isHost)
-            std::cout << "wrote bytecode bundle " << out << " ("
-                      << (embedded.size() + 1) << " modules)\n";
-        else {
-            std::cout << "no cross toolchain for '" << opts.target
-                      << "' - wrote portable bundle " << out << "\n"
-                      << "  install e.g. llvm-mingw / aarch64-linux-gnu-g++"
-                      << " or set COCO_CXX_" ;
-            for (char c : opts.target)
-                std::cout << (c == '-' ? '_' : (char)toupper((unsigned char)c));
-            std::cout << "=<path-to-g++>\n";
-        }
+        std::cout << "no cross toolchain for '" << opts.target
+                  << "' - wrote portable bundle " << out << "\n"
+                  << "  install e.g. llvm-mingw / aarch64-linux-gnu-g++"
+                  << " or set COCO_CXX_" ;
+        for (char c : opts.target)
+            std::cout << (c == '-' ? '_' : (char)toupper((unsigned char)c));
+        std::cout << "=<path-to-g++>\n";
         if (!opts.obj) return 0;
     }
 
@@ -2684,8 +2680,6 @@ int cmdBuild(const std::vector<std::string>& args, size_t from) {
         else if (a == "--debug") opts.release = false;
         else if (a == "-S" || a == "-s" || a == "--asm") opts.sasm = true;
         else if (a == "-O" || a == "--obj") opts.obj = true;
-        else if (a == "-B" || a == "-b" || a == "--bytecode")
-            opts.bytecode = true;
         else if (a.rfind("--target=", 0) == 0)
             opts.target = a.substr(9);
         else if (a == "--target" && i + 1 < args.size())
@@ -2876,8 +2870,8 @@ void usage() {
         << "           [--release|--debug]     optimization profile\n"
         << "           [--target=<os>-<arch>]    like GOOS/GOARCH; default "
                "$COCO_TARGET or host\n"
-        << "           [-S|-O|-B]                -S asm listing, -O .obj+."
-               "lib, -B bytecode\n"
+         << "           [-S|-O]                    -S asm listing, -O .obj+."
+               "lib\n"
         << "           [-o <path>]               output path (Go build -o)\n"
         << "  coco targets                     list all supported target "
                "triples\n"

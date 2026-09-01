@@ -355,7 +355,7 @@ compiles and runs; a double-borrow error fires; non-`@checked` code is untouched
 
 **Why:** C/C++ dominate wherever performance is the deciding adoption factor (embedded, kernels,
 engines). Go built `go bench`; Rust built criterion. Coco already has `coco build -O` (native
-obj+exe via the prebuilt MSVC runtime, `tools/coco.cpp:2517-2560`) and `-B`/cross-build.
+obj+exe via the prebuilt MSVC runtime, `tools/coco.cpp:2517-2560`) and `.cob`/cross-build.
 
 **Goal:** adopt `PLAN.md` Phase 8 (`coco bench` + fast-AOT) so "how fast is Coco" is *measurable
 and improvable*, and publish benchmark numbers as the adoption proof.

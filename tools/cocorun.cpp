@@ -1,6 +1,6 @@
 // cocorun: lex + parse + semantic-check + interpret a Coco source file,
-// or execute a self-contained bytecode bundle (.cob) produced by
-// `coco build -B` / cross-target fallbacks.
+// or execute a self-contained bytecode bundle (.cob) produced by `coco build`
+// cross-target fallbacks.
 //   cocorun <file.co | file.cob> [args...]
 //                                 run program; main()'s Int return is the
 //                                 process exit code (default 0)

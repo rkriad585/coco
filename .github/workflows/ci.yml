@@ -22,7 +22,7 @@ jobs:
         shell: pwsh
         run: scripts/runall.ps1 -Runner build\Debug\cocorun.exe
 
-      - name: Bytecode roundtrip (build -B -> cocorun)
+      - name: Bytecode bundle roundtrip (build fallback -> cocorun)
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
@@ -36,7 +36,8 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           Push-Location demo
           try {
-            & $coco "build" "-B"
+            # a non-host target with no toolchain falls back to a .cob bundle
+            & $coco "build" "--target=linux-amd64"
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
             $cob = Get-ChildItem build -Recurse -Filter demo.cob | Select-Object -First 1
             if (-not $cob) { Write-Host "::error::no .cob produced"; exit 1 }

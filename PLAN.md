@@ -240,7 +240,8 @@ authoritative correctness model.
 ### 4.3 Architecture
 - The interpreter becomes "compile AST → bytecode → run VM"; the AST remains the sema/front-end
   target so `coco check`, `coco lint`, tooling all operate on one tree.
-- `coco build -B` (bytecode bundle `.cob`) already exists — make the VM the runtime for `.cob`.
+- The portable bytecode bundle (`.cob`, emitted by `coco build` for toolchain-less
+  cross targets) already exists — the VM is its runtime.
 
 ### 4.4 Verified status (VM default-on; specialized ops + flat-SP stack landed)
 - The core-slice VM is **correct** (32/32 deterministic differential match; 33/33 corpus; 8/8
@@ -475,7 +476,7 @@ and multi-archive releases.
   GNU toolchains; fall back to the GNU/PATH-probe path when zig is absent (back-compat).
 - **Static linking** option (`--static`) bundling libc/libcoco → portable single binaries.
 - **`.cob` portable bytecode** already exists as the no-toolchain fallback; keep it as a
-  target equal to native (`coco build -B`).
+  target equal to native.
 - **Installers**: `--install` producing per-OS artifacts — Windows `.zip`/`.exe`, macOS
   `universal2` (build both arch slices), Linux `tar.gz` — with `SHA256SUMS` (cargo-forge model).
 
@@ -488,7 +489,7 @@ and multi-archive releases.
 ### Exit criteria
 - `coco build --target=windows-arm64|linux-amd64|darwin-amd64` succeeds from the Windows host
   using zig (and the existing GNU fallback without zig).
-- `--static`, `-B`, universal2, and `--install --result build/release` produce the documented
+- `--static`, universal2, and `--install --result build/release` produce the documented
   artifacts + `SHA256SUMS`.
 - CTest runs the full suite; GitHub Actions matrix adds a Linux + macOS job (and a zig-build
   job) — currently only Windows itself is built in CI.
