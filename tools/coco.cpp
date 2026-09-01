@@ -504,6 +504,7 @@ int runProgramSrc(const std::string& label, const std::string& src,
         for (const auto& d : dirs) interp.addStdlibDir(d);
         for (const auto& [name, esrc] : embedded)
             interp.addEmbeddedSource(name, esrc);
+        interp.enableVm();   // bytecode VM is the default runner
         coco::interp::Value r = interp.run();
         return r.k == coco::interp::VK::Int ? (int)r.i : 0;
     } catch (const coco::interp::PanicSignal& p) {
@@ -2434,6 +2435,7 @@ int buildProgram(const std::string& name, const std::string& version,
       << "        coco::interp::Interpreter interp(root);\n"
       << "        for (const auto& e : kEmbed) "
          "interp.addEmbeddedSource(e.key, e.src);\n"
+      << "        interp.enableVm();   // bytecode VM is the default runner\n"
       << "        auto r = interp.run();\n"
       << "        return r.k == coco::interp::VK::Int ? (int)r.i : 0;\n"
       << "    } catch (const coco::interp::PanicSignal& p) {\n"

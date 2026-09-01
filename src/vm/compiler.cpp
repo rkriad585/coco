@@ -85,6 +85,26 @@ bool isCmpOp(const std::string& op) {
     return op == "<" || op == "<=" || op == ">" || op == ">=";
 }
 
+// Map an arithmetic/comparison operator token to a specialized opcode, or 0 if
+// no specialized opcode exists (caller then falls back to generic OP_BINARY).
+uint16_t specializedBinaryOp(const std::string& op) {
+    if (op == "+")  return OP_BINARY_ADD;
+    if (op == "-")  return OP_BINARY_SUB;
+    if (op == "*")  return OP_BINARY_MUL;
+    if (op == "/")  return OP_BINARY_DIV;
+    if (op == "%" || op == "mod") return OP_BINARY_MOD;
+    if (op == "**" || op == "pow") return OP_BINARY_POW;
+    if (op == "<")  return OP_LT;
+    if (op == "<=") return OP_LE;
+    if (op == ">")  return OP_GT;
+    if (op == ">=") return OP_GE;
+    if (op == "==") return OP_EQ;
+    if (op == "!=") return OP_NE;
+    if (op == "..") return OP_RANGE;
+    if (op == "..=") return OP_RANGE;   // handled via OP_RANGE; inclusive flag set below
+    return 0;
+}
+
 // Collect the names that are definitively local to a function body (params plus
 // any name used as a declaration/assignment/for-bind target). Used to decide at
 // compile time whether an Ident receiver of `.member`/`.method` is a value
@@ -281,7 +301,9 @@ public:
                 compileExpr(em, *s.exprs[0]);
                 compileExpr(em, *s.exprs[1]);
                 std::string op = s.augOp.empty() ? "+" : s.augOp.substr(0, s.augOp.size() - 1);
-                em.emit(OP_BINARY, em.strId(op));
+                uint16_t spOp = specializedBinaryOp(op);
+                if (spOp && spOp != OP_RANGE) em.emit(spOp);
+                else em.emit(OP_BINARY, em.strId(op));
                 emitStore(em, *s.exprs[0]);
                 break;
             }
@@ -418,7 +440,9 @@ public:
                 if (e.op == "try") { compileExpr(em, *e.rhs); em.emit(OP_TRY); break; }
                 if (e.op == "spawn") { em.f.interpreted = true; em.emit(OP_NONEZ); break; }
                 compileExpr(em, *e.rhs);
-                em.emit(OP_UNARY, em.strId(e.op));
+                if (e.op == "-") em.emit(OP_NEG);
+                else if (e.op == "not") em.emit(OP_NOT);
+                else em.emit(OP_UNARY, em.strId(e.op));
                 break;
             }
             case ExKind::Binary: {
@@ -452,17 +476,16 @@ public:
                 }
                 if (op == "in") { compileExpr(em, *e.rhs); em.emit(OP_IN); break; }
                 if ((op == ".." || op == "..=") && !e.rhs) { em.emit(OP_UNARANGE); break; }
-                if (op == ".." || op == "..=") { compileExpr(em, *e.rhs); em.emit(OP_BINARY, em.strId(op)); break; }
-                if (isCmpOp(op)) {
-                    if (e.lhs->kind == ExKind::Binary && isCmpOp(e.lhs->op)) {
-                        em.f.interpreted = true; break;   // chained comparison
-                    }
-                    compileExpr(em, *e.rhs);
-                    em.emit(OP_BINARY, em.strId(op));
-                    break;
+                if ((op == ".." || op == "..=")) { compileExpr(em, *e.rhs); em.emit(OP_RANGE, op == "..=" ? 1 : 0); break; }
+                if (isCmpOp(op) && e.lhs->kind == ExKind::Binary && isCmpOp(e.lhs->op)) {
+                    em.f.interpreted = true; break;   // chained comparison
                 }
-                compileExpr(em, *e.rhs);
-                em.emit(OP_BINARY, em.strId(op));
+                {
+                    uint16_t spOp = specializedBinaryOp(op);
+                    compileExpr(em, *e.rhs);
+                    if (spOp) em.emit(spOp);
+                    else em.emit(OP_BINARY, em.strId(op));
+                }
                 break;
             }
             case ExKind::Member: {

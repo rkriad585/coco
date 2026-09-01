@@ -71,9 +71,20 @@ enum Op : uint16_t {
     OP_MEMBER_METHOD, // pop recv + b args; a=name idx; c=nilSafe -> method result
 
     // ops
-    OP_UNARY,      // pop v; a = op-string idx
+    OP_UNARY,      // pop v; a = op-string idx (generic fallback)
     OP_UNARANGE,   // pop lo (int); push open-ended range lo..(hi=-1)
-    OP_BINARY,     // pop r,l; a = op idx
+    OP_BINARY,     // pop r,l; a = op idx (generic fallback)
+
+    // Specialized binary opcodes (numeric immediates, no string compare).
+    // a = unused. Each does an inline int/float fast path, falling back to the
+    // same tree-walker helper (binop/compareOne) used by the generic OP_BINARY.
+    OP_BINARY_ADD, OP_BINARY_SUB, OP_BINARY_MUL, OP_BINARY_DIV, OP_BINARY_MOD,
+    OP_BINARY_POW,
+    OP_LT, OP_LE, OP_GT, OP_GE, OP_EQ, OP_NE,
+    OP_RANGE,       // pop lo,hi -> range (a=1 for ..= inclusive)
+    OP_NEG,         // pop v -> -v (int/float fast path)
+    OP_NOT,         // pop v -> boolean(!truthy(v))
+
     OP_AND,        // pop l; if truthy(pop r) ... -> boolean truthy(and)
     OP_OR,
     OP_IS,         // pop r,l; a = type-name idx or -1(none)

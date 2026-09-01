@@ -242,26 +242,32 @@ authoritative correctness model.
   target so `coco check`, `coco lint`, tooling all operate on one tree.
 - `coco build -B` (bytecode bundle `.cob`) already exists — make the VM the runtime for `.cob`.
 
-### 4.4 Verified status (compact VmVal landed)
+### 4.4 Verified status (VM default-on; specialized ops + flat-SP stack landed)
 - The core-slice VM is **correct** (32/32 deterministic differential match; 33/33 corpus; 8/8
-  negatives; 7/7 conventions, in both Debug and Release; ASan-clean under the VM). It is opt-in
-  via `--vm`.
-- **Slot-based locals** are implemented: frame-level and loop-var names are assigned compile-time
-  integer slots and accessed via `OP_LOAD_LOCAL`/`OP_STORE_LOCAL`/`OP_ITER_VALUE_LOCAL` (flat
-  `Value[]` per call) instead of `env->find` string hashing. A depth-aware shadow guard falls back
-  to the exact env path whenever a slot name would be shadowed, preserving semantics.
-- **Compact `VmVal` (Phase 4 bytecode-VM fix, research-backed):** the operand stack and frame
-  locals in `vmRunBody` now use a local ~16-byte tagged `VmVal` (`VK` + inline int/float/bool/char
-  + heap `Value*` box for compound values). This eliminates shuffling the 472-byte shared `Value`
-  through the VM per op — the root cause of the loop gap. The authoritative tree-walker `Value`
-  (472 bytes) is unchanged on the user-facing API.
-- **Honest perf result (Release, measured, best-of-3):** the VM is now **faster than the
-  tree-walker on every workload**:
-  - `for i in 0..n` arithmetic loop: ratio ≈ 0.53 ⇒ ~1.9× faster (was ~1.35× slower).
-  - `while` arithmetic loop: ratio ≈ 0.68 ⇒ ~1.5× faster (was ~1.8× slower).
-  - fib(25) call bench: ratio ≈ 0.27 ⇒ ~3.7× faster (was ~0.4, ~2.5× faster).
-  The compact operands turned the previously dispatch-bound arithmetic loops from negative to
-  clearly positive. `--vm` remains opt-in (off by default) pending wiring into `coco build`.
+  negatives; 7/7 conventions, in both Debug and Release; ASan-clean under the VM) and is now the
+  **default runner** — `cocorun` (no flag), `coco run`, `coco test`, `coco build` and the
+  executables `coco build` produces all run on the VM. Pass `--no-vm` / a `--no-vm`-style flag to
+  force the tree-walker for comparison.
+- **Slot-based locals:** frame-level and loop-var names are assigned compile-time integer slots and
+  accessed via `OP_LOAD_LOCAL`/`OP_STORE_LOCAL`/`OP_ITER_VALUE_LOCAL` (flat `Value[]` per call)
+  instead of `env->find` string hashing. A depth-aware shadow guard falls back to the exact env
+  path whenever a slot name would be shadowed.
+- **Compact `VmVal`:** the operand stack and frame locals in `vmRunBody` use a ~16-byte tagged
+  `VmVal` (`VK` + inline int/float/bool/char + heap `Value*` box) instead of moving the 472-byte
+  shared `Value` per op.
+- **Research-backed speedups (new, 2026):** per CPython PEP 659 / Ruby YARV opt_* opcodes and the
+  stack-pointer model (Ruby `cfp->sp`, CPython `stack_pointer`):
+  - **Specialized numeric opcodes** (`OP_BINARY_ADD/SUB/MUL/DIV/MOD/POW`, `OP_LT/LE/GT/GE/EQ/NE`,
+    `OP_RANGE`, `OP_NEG`, `OP_NOT`) — the operator is an immediate, so the hot arithmetic/comparison
+    loop does **no per-op string compare** (before, `OP_BINARY` did `if (op=="+") … else if` chains).
+  - **Flat pre-sized operand stack with an explicit stack-pointer (index-SP)** — push/pop reuse
+    slots via `st[sp]/st[sp-1]` instead of `std::vector::push_back/pop_back` per op; heap-backed so
+    it stays safe under deep recursion.
+- **Honest perf result (Release, measured, best-of-3, idle machine):** VM is ~2.7–4× faster than the
+  tree-walker:
+  - `for i in 0..n` arithmetic loop: ratio ≈ 0.37 ⇒ ~2.7× faster.
+  - `while` arithmetic loop: ratio ≈ 0.35 ⇒ ~2.9× faster.
+  - fib(25) call bench: ratio ≈ 0.25 ⇒ ~4.0× faster.
 
 ### Exit criteria
 - `svm` differential test: thousands of randomized programs produce identical output in

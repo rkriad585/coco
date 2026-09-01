@@ -1,17 +1,22 @@
 # VM-vs-tree-walker benchmark (Release build required for meaningful numbers).
 # Run:  scripts/bench.ps1
 #
-# HONEST STATUS (compact VmVal landed):
-#   The VM is fully correct (32/32 deterministic corpus match, ASan-clean) and now uses
-#   flat per-frame Value[] slot addressing (OP_LOAD_LOCAL/OP_STORE_LOCAL +
-#   OP_ITER_VALUE_LOCAL) for frame-level and loop-var locals, plus a compact ~16-byte
-#   tagged VmVal (inline int/float/bool/char + heap Value* box) for the VM operand
-#   stack and frame locals, instead of moving the 472-byte shared Value per op.
-#   Measured (Release, best-of-3): VM is faster on every workload —
-#     arithmetic range loop: ratio ~0.53 (~1.9x faster, was ~1.35x slower)
-#     arithmetic while loop: ratio ~0.68 (~1.5x faster, was ~1.8x slower)
-#     fib(25) call bench:   ratio ~0.27 (~3.7x faster, was ~0.4 / ~2.5x faster)
-#   Keep --vm opt-in (not default) until it is wired into coco build/executables.
+# HONEST STATUS (specialized opcodes + flat-SP stack + VM default):
+#   The bytecode VM is now the DEFAULT runner (cocorun, coco run/test/build and
+#   produced executables). It is fully correct (32/32 differential, 33/33 corpus,
+#   8/8 negatives, 7/7 conventions, ASan-clean). Optimizations landed:
+#     - compact ~16-byte tagged VmVal (inline int/float/bool/char + heap Value* box)
+#       for the operand stack/frame instead of moving the 472-byte shared Value
+#     - flat Value[] slot locals (OP_LOAD_LOCAL/STORE_LOCAL/ITER_VALUE_LOCAL)
+#     - specialized numeric binary/unary opcodes (OP_BINARY_ADD/SUB/..., OP_LT/LE/
+#       GT/GE/EQ/NE, OP_RANGE, OP_NEG, OP_NOT) — no per-op string compares
+#     - flat pre-sized operand stack with an explicit stack-pointer (index-SP),
+#       avoiding std::vector push_back/pop_back per op
+#   Measured (Release, best-of-3) — VM is ~2.7-4x faster than the tree-walker:
+#     arithmetic range loop: ratio ~0.37 (~2.7x faster)
+#     arithmetic while loop: ratio ~0.35 (~2.9x faster)
+#     fib(25) call bench:   ratio ~0.25 (~4.0x faster)
+#   Use --no-vm to force the tree-walker for comparison.
 param([string]$Exe = "build-rel\cocorun.exe", [switch]$DebugBuild)
 
 if (-not $DebugBuild -and -not (Test-Path $Exe)) {

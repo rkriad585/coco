@@ -4074,7 +4074,75 @@ Value Interpreter::vmRunBody(const vm::VmFunction& vf, Env fenv) {
         }
     };
 
+    // ---- Specialized numeric binary/unary fast paths (no string compare) ----
+    // Opcode encodes the operator as an integer, so the hot arithmetic/comparison
+    // loop dispatches on a small int instead of comparing operator strings. Each
+    // fast path operates entirely on unboxed VmVal scalars and pushes a scalar
+    // result; on any non-scalar operand it returns false so the caller falls back
+    // to the exact tree-walker helper (binop / compareOne) via take().
+    enum BinK : uint8_t {
+        B_ADD, B_SUB, B_MUL, B_DIV, B_MOD, B_POW,
+        B_LT, B_LE, B_GT, B_GE, B_EQ, B_NE
+    };
+    auto binFast = [](BinK k, const VmVal& l, const VmVal& r, VmVal& out) -> bool {
+        if (l.k != VK::Int && l.k != VK::Float) return false;
+        if (r.k != VK::Int && r.k != VK::Float) return false;
+        switch (k) {
+            case B_ADD: case B_SUB: case B_MUL: case B_DIV: case B_MOD: case B_POW: {
+                if (l.k == VK::Float || r.k == VK::Float) {
+                    double a = l.k == VK::Float ? l.u.d : (double)l.u.i;
+                    double b = r.k == VK::Float ? r.u.d : (double)r.u.i;
+                    double res;
+                    if (k == B_ADD) res = a + b;
+                    else if (k == B_SUB) res = a - b;
+                    else if (k == B_MUL) res = a * b;
+                    else if (k == B_DIV) res = a / b;
+                    else if (k == B_MOD) res = std::fmod(a, b);
+                    else res = std::pow(a, b);
+                    out.k = VK::Float; out.u.d = res; return true;
+                }
+                int64_t a = l.u.i, b = r.u.i, res;
+                if (k == B_ADD) res = a + b;
+                else if (k == B_SUB) res = a - b;
+                else if (k == B_MUL) res = a * b;
+                else if (k == B_DIV) { out.k = VK::Float; out.u.d = (double)a / (double)b; return true; }
+                else if (k == B_MOD) res = a % b;
+                else { out.k = VK::Float; out.u.d = std::pow((double)a, (double)b); return true; }
+                out.k = VK::Int; out.u.i = res; return true;
+            }
+            default: { // comparisons
+                bool res;
+                if (l.k == VK::Float || r.k == VK::Float) {
+                    double a = l.k == VK::Float ? l.u.d : (double)l.u.i;
+                    double b = r.k == VK::Float ? r.u.d : (double)r.u.i;
+                    if (k == B_LT) res = a < b; else if (k == B_LE) res = a <= b;
+                    else if (k == B_GT) res = a > b; else if (k == B_GE) res = a >= b;
+                    else if (k == B_EQ) res = a == b; else res = a != b;
+                } else {
+                    int64_t a = l.u.i, b = r.u.i;
+                    if (k == B_LT) res = a < b; else if (k == B_LE) res = a <= b;
+                    else if (k == B_GT) res = a > b; else if (k == B_GE) res = a >= b;
+                    else if (k == B_EQ) res = a == b; else res = a != b;
+                }
+                out.k = VK::Bool; out.u.b = res; return true;
+            }
+        }
+    };
+    auto slowBin = [this, &fromVal](const char* op, VmVal l, VmVal r) -> VmVal {
+        Value lv = l.take(); Value rv = r.take();
+        std::string so(op);
+        if (so == "<" || so == "<=" || so == ">" || so == ">=")
+            return fromVal(compareOne(so, lv, rv));
+        return fromVal(binop(so, lv, rv, 0, 0));
+    };
+
+    // Flat operand stack with an explicit stack pointer (index-SP). The vector
+    // is pre-sized once so push/pop reuse slots via `st[sp]`/`st[sp-1]` instead
+    // of issuing push_back/pop_back (with their size/capacity bookkeeping and
+    // element destruction) per op. It still grows on the heap if ever overflowed,
+    // so it is safe for deep recursion (no fixed call-stack buffer).
     std::vector<VmVal> st;
+    size_t sp = 0;
     struct VmIter {
         enum Kind { Vec, Range } kind = Vec;
         std::vector<Value> vec;   // Vec mode: materialized elements
@@ -4084,7 +4152,7 @@ Value Interpreter::vmRunBody(const vm::VmFunction& vf, Env fenv) {
     std::vector<VmIter> iters;
     size_t pc = 0;
     Env env = fenv;
-    st.reserve(64);
+    st.reserve(1024);
     // Frame-level slot storage. Params are bound into fenv by runFunc before
     // entering here; preload them so OP_LOAD_LOCAL/OP_STORE_LOCAL hit locals[].
     std::vector<VmVal> locals;
@@ -4097,11 +4165,15 @@ Value Interpreter::vmRunBody(const vm::VmFunction& vf, Env fenv) {
     }
 
     auto pop = [&]() -> VmVal {
-        VmVal v = std::move(st.back());
-        st.pop_back();
+        VmVal v = std::move(st[sp - 1]);
+        --sp;
         return v;
     };
-    auto push = [&](VmVal v) { st.push_back(std::move(v)); };
+    auto push = [&](VmVal v) {
+        if (sp < st.size()) st[sp] = std::move(v);
+        else st.push_back(std::move(v));
+        ++sp;
+    };
     // Compiler emits relative offsets measured from the jump instruction's own
     // index (a = target - here()). The dispatch loop has already advanced `pc`
     // past it (code[pc++]), so subtract one to land exactly on the target.
@@ -4184,77 +4256,62 @@ Value Interpreter::vmRunBody(const vm::VmFunction& vf, Env fenv) {
                     push(fromVal(Value::rangeV(l.u.i, r.u.i, op == "..=")));
                     break;
                 }
-                // Fast scalar path: int/float arithmetic and comparisons done
-                // entirely on unboxed values, avoiding any Value construction.
-                if (l.isScalar() && r.isScalar() &&
-                    (l.k == VK::Int || l.k == VK::Float) &&
-                    (r.k == VK::Int || r.k == VK::Float)) {
-                    if (op == "<" || op == "<=" || op == ">" || op == ">=") {
-                        bool res;
-                        if (l.k == VK::Float || r.k == VK::Float) {
-                            double a = l.k==VK::Float?l.u.d:(double)l.u.i;
-                            double b = r.k==VK::Float?r.u.d:(double)r.u.i;
-                            if (op=="<") res = a<b; else if (op=="<=") res=a<=b;
-                            else if (op==">") res = a>b; else res = a>=b;
-                        } else {
-                            int64_t a=l.u.i, b=r.u.i;
-                            if (op=="<") res=a<b; else if (op=="<=") res=a<=b;
-                            else if (op==">") res=a>b; else res=a>=b;
-                        }
-                        push(mkScalar(VK::Bool,0,0,res,0)); break;
-                    }
-                    if (op == "+") {
-                        if (l.k==VK::Float||r.k==VK::Float) push(mkScalar(VK::Float,0,(l.k==VK::Float?l.u.d:(double)l.u.i)+(r.k==VK::Float?r.u.d:(double)r.u.i),false,0));
-                        else push(mkScalar(VK::Int,l.u.i+r.u.i,0,false,0));
-                        break;
-                    }
-                    if (op == "-") {
-                        if (l.k==VK::Float||r.k==VK::Float) push(mkScalar(VK::Float,0,(l.k==VK::Float?l.u.d:(double)l.u.i)-(r.k==VK::Float?r.u.d:(double)r.u.i),false,0));
-                        else push(mkScalar(VK::Int,l.u.i-r.u.i,0,false,0));
-                        break;
-                    }
-                    if (op == "*") {
-                        if (l.k==VK::Float||r.k==VK::Float) push(mkScalar(VK::Float,0,(l.k==VK::Float?l.u.d:(double)l.u.i)*(r.k==VK::Float?r.u.d:(double)r.u.i),false,0));
-                        else push(mkScalar(VK::Int,l.u.i*r.u.i,0,false,0));
-                        break;
-                    }
-                    if (op == "/") {
-                        double a = l.k==VK::Float?l.u.d:(double)l.u.i;
-                        double b = r.k==VK::Float?r.u.d:(double)r.u.i;
-                        push(mkScalar(VK::Float,0,a/b,false,0)); break;
-                    }
-                    if (op == "%" || op == "mod") {
-                        if (l.k==VK::Float||r.k==VK::Float) {
-                            double a=l.k==VK::Float?l.u.d:(double)l.u.i, b=r.k==VK::Float?r.u.d:(double)r.u.i;
-                            push(mkScalar(VK::Float,0,std::fmod(a,b),false,0));
-                        } else { push(mkScalar(VK::Int,l.u.i%r.u.i,0,false,0)); }
-                        break;
-                    }
-                    if (op == "==") {
-                        bool res;
-                        if (l.k==VK::Float||r.k==VK::Float) res = (l.k==VK::Float?l.u.d:(double)l.u.i)==(r.k==VK::Float?r.u.d:(double)r.u.i);
-                        else res = l.u.i==r.u.i;
-                        push(mkScalar(VK::Bool,0,0,res,0)); break;
-                    }
-                    if (op == "!=") {
-                        bool res;
-                        if (l.k==VK::Float||r.k==VK::Float) res = (l.k==VK::Float?l.u.d:(double)l.u.i)!=(r.k==VK::Float?r.u.d:(double)r.u.i);
-                        else res = l.u.i!=r.u.i;
-                        push(mkScalar(VK::Bool,0,0,res,0)); break;
-                    }
-                    if (op == "**" || op == "pow") {
-                        double a=l.k==VK::Float?l.u.d:(double)l.u.i, b=r.k==VK::Float?r.u.d:(double)r.u.i;
-                        push(mkScalar(VK::Float,0,std::pow(a,b),false,0)); break;
-                    }
+                push(slowBin(op.c_str(), l, r));
+                break;
+            }
+
+            case OP_RANGE: {
+                VmVal r = pop();
+                VmVal l = pop();
+                push(fromVal(Value::rangeV(l.u.i, r.u.i, ins.a != 0)));
+                break;
+            }
+
+            // Specialized arithmetic/comparison fast paths (no string compare).
+            case OP_BINARY_ADD: case OP_BINARY_SUB: case OP_BINARY_MUL:
+            case OP_BINARY_DIV: case OP_BINARY_MOD: case OP_BINARY_POW:
+            case OP_LT: case OP_LE: case OP_GT: case OP_GE: case OP_EQ: case OP_NE: {
+                VmVal r = pop();
+                VmVal l = pop();
+                VmVal o;
+                BinK k;
+                const char* fb;
+                switch (ins.op) {
+                    case OP_BINARY_ADD: k = B_ADD; fb = "+"; break;
+                    case OP_BINARY_SUB: k = B_SUB; fb = "-"; break;
+                    case OP_BINARY_MUL: k = B_MUL; fb = "*"; break;
+                    case OP_BINARY_DIV: k = B_DIV; fb = "/"; break;
+                    case OP_BINARY_MOD: k = B_MOD; fb = "%"; break;
+                    case OP_BINARY_POW: k = B_POW; fb = "**"; break;
+                    case OP_LT: k = B_LT; fb = "<"; break;
+                    case OP_LE: k = B_LE; fb = "<="; break;
+                    case OP_GT: k = B_GT; fb = ">"; break;
+                    case OP_GE: k = B_GE; fb = ">="; break;
+                    case OP_EQ: k = B_EQ; fb = "=="; break;
+                    default:   k = B_NE; fb = "!="; break;
                 }
-                Value lv = l.take();
-                Value rv = r.take();
-                if (op == "<" || op == "<=" || op == ">" || op == ">=")
-                    push(fromVal(compareOne(op, lv, rv)));
-                else {
-                    // NaN-compatible compare for == is handled by binop
-                    push(fromVal(binop(op, lv, rv, 0, 0)));
-                }
+                if (binFast(k, l, r, o)) push(std::move(o));
+                else push(slowBin(fb, l, r));
+                break;
+            }
+
+            case OP_NEG: {
+                VmVal v = pop();
+                if (v.k == VK::Int) { v.u.i = -v.u.i; push(std::move(v)); break; }
+                if (v.k == VK::Float) { v.u.d = -v.u.d; push(std::move(v)); break; }
+                panicHere("unary operator expects a number");
+                break;
+            }
+
+            case OP_NOT: {
+                VmVal v = pop();
+                bool t;
+                if (v.k == VK::None) t = false;
+                else if (v.k == VK::Bool) t = v.u.b;
+                else if (v.k == VK::Int) t = v.u.i != 0;
+                else if (v.k == VK::Float) t = v.u.d != 0.0;
+                else { Value fv = v.take(); t = truthy(fv); }
+                push(mkScalar(VK::Bool, 0, 0, !t, 0));
                 break;
             }
 

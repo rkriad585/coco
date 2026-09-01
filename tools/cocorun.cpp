@@ -108,10 +108,10 @@ static bool unpackCob(const std::string& path, std::string& mainSrc,
 }
 
 // shared pipeline: front-end + interpret, with panic handling
-// The bytecode VM is opt-in (--vm). It is verified-correct against the
-// tree-walker and faster (see scripts/bench.ps1), but is NOT the default
-// until it is wired into coco build/executables.
-static bool g_useVm = false;
+// The bytecode VM is now the DEFAULT runner: it is verified-correct against the
+// tree-walker (32/32 differential, 33/33 corpus, ASan-clean) and substantially
+// faster (see scripts/bench.ps1). Use --no-vm to force the tree-walker.
+static bool g_useVm = true;
 static int runSources(const std::string& label, const std::string& src,
                       const std::map<std::string, std::string>* embedded) {
     coco::DiagEngine diags;
@@ -172,9 +172,9 @@ int main(int argc, char** argv) {
     for (int i = 1; i < argc; ++i) {
         std::string a = argv[i];
         if (a == "-h" || a == "--help") {
-            std::cout << "usage: cocorun [--vm|--no-vm] <file.co | file.cob>\n"
-                         "  (--vm enables the bytecode-VM accelerator; the\n"
-                         "   tree-walker interpreter is the default)\n";
+            std::cout << "usage: cocorun [--no-vm|--vm] <file.co | file.cob>\n"
+                         "  (the bytecode-VM accelerator is the default; --no-vm\n"
+                         "   forces the tree-walker interpreter, --vm re-enables)\n";
             return 0;
         }
         if (a == "--vm") { g_useVm = true; continue; }
