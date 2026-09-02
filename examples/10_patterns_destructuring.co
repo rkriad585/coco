@@ -49,8 +49,8 @@ def main() {
 }
         case other is string { # binding with type test (never true here)
             print(other);
-
 }
+        case _ {}
 }
     print(area(Shape.Circle(radius: 2)), area(Shape.Dot));
 }

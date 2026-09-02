@@ -1,0 +1,47 @@
+# 38 — pattern power (Rust PatKind parity)   (DO_FIRST_PLAN Phase 3)
+# slice `[a, b, ..rest]`, pure-rest `..`, tuple-rest `(x, y, ..)`, nested
+# `@` aliases, and ref `&pat` patterns — expressed with `match`-**as-expression**.
+
+class Point { var x: int = 0; var y: int = 0; }
+
+def describe(xs) -> string {
+    # match used as an EXPRESSION, value flows up (not via statement result).
+    return match xs {
+        case []                      { "empty"; }
+        case [a, b, ..rest]          { "a=" + str(a) + " b=" + str(b) + " rest=" + str(rest); }
+        case [a, ..]                 { "front=" + str(a); }
+        case _                       { "other"; }
+    };
+}
+
+def tup_sum(t) -> string {
+    return match t {
+        case (x, y, ..)              { "t=" + str(x) + "," + str(y); }
+        case (x,)                    { "one=" + str(x); }
+        case _                       { "none"; }
+    };
+}
+
+def main() {
+    print(describe([]));
+    print(describe([1, 2, 3, 4]));
+    print(describe([9]));
+    print(describe("nope"));
+
+    print(tup_sum((10, 20, 30, 40)));
+    print(tup_sum((7,)));
+
+    n = 3;
+    s = match n {
+        case v @ (1..=5) { "small " + str(v); }   # nested @ alias
+        case _           { "big"; }
+    };
+    print("nested @ => " + s);
+
+    p = Point(x: 1, y: 2);
+    m = match p {
+        case &Point { "borrowed point"; }   # ref pattern (transparent deref)
+        case _      { "other"; }
+    };
+    print("ref pattern => " + m);
+}

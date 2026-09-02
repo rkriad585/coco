@@ -490,7 +490,8 @@ bool unpackCob(const std::string& path, std::string& mainSrc,
 
 int runProgramSrc(const std::string& label, const std::string& src,
                   const std::vector<std::string>& dirs,
-                  const std::map<std::string, std::string>& embedded) {
+                  const std::map<std::string, std::string>& embedded,
+                  const std::vector<std::string>& progArgs = {}) {
     coco::DiagEngine diags;
     auto body = frontEnd(label, src, diags);
     if (diags.errorCount()) {
@@ -506,6 +507,7 @@ int runProgramSrc(const std::string& label, const std::string& src,
         for (const auto& d : dirs) interp.addStdlibDir(d);
         for (const auto& [name, esrc] : embedded)
             interp.addEmbeddedSource(name, esrc);
+        interp.setProgramArgs(progArgs);
         interp.enableVm();   // bytecode VM is the default runner
         coco::interp::Value r = interp.run();
         return r.k == coco::interp::VK::Int ? (int)r.i : 0;
@@ -525,13 +527,14 @@ int runProgramSrc(const std::string& label, const std::string& src,
 
 int runProgram(const std::string& entryPath,
                const std::vector<std::string>& dirs,
-               const std::map<std::string, std::string>& embedded = {}) {
+               const std::map<std::string, std::string>& embedded = {},
+               const std::vector<std::string>& progArgs = {}) {
     std::string src;
     if (!readFile(entryPath, src)) {
         std::cerr << "coco: cannot read '" << entryPath << "'\n";
         return 66;
     }
-    return runProgramSrc(entryPath, src, dirs, embedded);
+    return runProgramSrc(entryPath, src, dirs, embedded, progArgs);
 }
 
 // ---------------------------------------------------------------------------
@@ -1818,6 +1821,7 @@ struct BuildOpts {
     bool obj = false;        // -O  native object file (.obj + .lib via lib.exe)
     bool singleFile = false; // `coco build file.co` (Go-style, no manifest)
     bool native_ = false;    // --native  lower scalar user fns to real C++
+    bool asan = false;       // --asan    build with AddressSanitizer
     std::string target;      // --target=<os>-<arch>; empty -> $COCO_TARGET -> host
     std::string outPath;     // -o <path> (Go build -o)
     std::string defaultOut;  // single-file: extensionless default in CWD
@@ -1900,6 +1904,19 @@ std::string resolveCrossCxx(const TargetInfo* ti) {
         if (toolchainWorks(any)) return any;
     for (const auto& cand : ti->cxxCandidates)
         if (toolchainWorks(cand)) return cand;
+    return "";
+}
+
+// Find the MSVC cl.exe the host build uses (COCO_CL -> hardcoded toolchain ->
+// PATH `where cl`). Empty string means no MSVC toolchain is reachable.
+std::string resolveHostCl() {
+    if (const char* env = std::getenv("COCO_CL"))
+        if (*env) return env;
+    const std::string hard =
+        "C:/msvc/VC/Tools/MSVC/14.51.36231/bin/Hostx64/x64/cl.exe";
+    if (toolchainWorks(hard)) return hard;
+    // PATH probe: `where cl` returns zero if found
+    if (std::system("where cl >nul 2>nul") == 0) return "cl";
     return "";
 }
 
@@ -2422,8 +2439,11 @@ int buildProgram(const std::string& name, const std::string& version,
           << cppRawLiteral(src) << ";\n";
     o << "\nstruct Embed { const char* key; const char* src; };\n"
       << "static const Embed kEmbed[] = {\n";
-    for (const auto& [key, src] : embedded)
-        o << "    {\"" << key << "\", kMod_" << cIdent(key) << "},\n";
+    if (embedded.empty())
+        o << "    {\"\", \"\"},\n";   // MSVC rejects size-0 arrays; sentinel kept
+    else
+        for (const auto& [key, src] : embedded)
+            o << "    {\"" << key << "\", kMod_" << cIdent(key) << "},\n";
     o << "};\n\n";
     // --native: emit lowered C++ scalar function bodies + registration helper
     if (opts.native_ && natChk && !natDiags.errorCount()) {
@@ -2457,7 +2477,7 @@ int buildProgram(const std::string& name, const std::string& version,
       << "    try {\n"
       << "        coco::interp::Interpreter interp(root);\n"
       << "        for (const auto& e : kEmbed) "
-         "interp.addEmbeddedSource(e.key, e.src);\n"
+         "if (e.key[0]) interp.addEmbeddedSource(e.key, e.src);\n"
       << "        interp.enableVm();   // bytecode VM is the default runner\n"
       << "#ifdef COCO_HAS_NATIVE\n"
       << "        coco_native_register(interp, root.body);\n"
@@ -2482,7 +2502,23 @@ int buildProgram(const std::string& name, const std::string& version,
     // CGO_ENABLED=0: no prebuilt host libs, nothing external.
     // crossCxx is non-empty exactly when we want the GNU pipeline: any
     // target whose toolchain resolves (env override or PATH probe).
-    if (!crossCxx.empty()) {
+    // Cross targets (non-host) use the GNU pipeline: compile the whole runtime
+    // with the target's cross C++ toolchain into a self-contained static
+    // binary. Host builds skip this and use the fast MSVC pipeline below
+    // (prebuilt runtime .libs + cl.exe) - the "go build"-like path that needs
+    // no cross/mingw toolchain.
+    char exeDirBuf[MAX_PATH * 2];
+    GetModuleFileNameA(nullptr, exeDirBuf, sizeof exeDirBuf);
+    std::string exePath2(exeDirBuf);
+    size_t ds2 = exePath2.find_last_of("/\\");
+    std::string binRoot = ds2 == std::string::npos ? "." : exePath2.substr(0, ds2);
+    const bool hostHasMsvc = isHost && resolveHostCl() != "" &&
+                             fs::exists(fs::path(binRoot) / "coco_interp.lib");
+    // ASan instruments the WHOLE runtime, so it always uses the whole-runtime
+    // pipeline (GNU) rather than the fast launcher-only MSVC path (mixing an
+    // instrumented launcher with uninstrumented prebuilt libs is not linkable).
+    const bool useGnuCross = !isHost || !hostHasMsvc || opts.asan;
+    if (useGnuCross && !crossCxx.empty()) {
         char xbuf[MAX_PATH * 2];
         GetModuleFileNameA(nullptr, xbuf, sizeof xbuf);
         std::string xroot(xbuf);
@@ -2516,6 +2552,7 @@ int buildProgram(const std::string& name, const std::string& version,
             std::ostringstream r;
             r << "-std=c++20 -D_CRT_SECURE_NO_WARNINGS ";
             r << (opts.release ? "-O2 -s -w" : "-O1 -g") << " ";
+            if (opts.asan) r << "-fsanitize=address -g ";
             if (ti && ti->isWindows)
                 r << "-static-libgcc -static-libstdc++ ";
             r << "-I\"" << srcRoot << "\" ";
@@ -2544,15 +2581,9 @@ int buildProgram(const std::string& name, const std::string& version,
 
     // ---- host build via the prebuilt MSVC runtime libs -------------------
     // compile with the same toolchain cmake uses
-    const char* cl = std::getenv("COCO_CL");
-    std::string clPath =
-        cl ? cl
-           : "C:/msvc/VC/Tools/MSVC/14.51.36231/bin/Hostx64/x64/cl.exe";
-    char exeDirBuf[MAX_PATH * 2];
-    GetModuleFileNameA(nullptr, exeDirBuf, sizeof exeDirBuf);
-    std::string exePath(exeDirBuf);
-    size_t ds = exePath.find_last_of("/\\");
-    std::string binRoot = ds == std::string::npos ? "." : exePath.substr(0, ds);
+    std::string clPath = std::getenv("COCO_CL") && *std::getenv("COCO_CL")
+                             ? std::getenv("COCO_CL")
+                             : resolveHostCl();
 
     // NOTE: must not start with '"' â€” cmd /c strips leading quotes.
     // NOTE: no quoted paths ending in '\' (argv would eat the quote).
@@ -2599,6 +2630,14 @@ int buildProgram(const std::string& name, const std::string& version,
     }
 
     std::string flags = detectRuntimeFlags(binRoot);
+    if (opts.release) {
+        // --release: force -O2 on the emitted C++ even if the prebuilt runtime
+        // libs are a debug build (optimized launcher, same lib set). A release
+        // cache of the runtime yields the full win; see coco build --release.
+        if (flags.find("/O2") == std::string::npos &&
+            flags.find("/Ox") == std::string::npos)
+            flags += " /O2";
+    }
     std::string exeOut = outBase;
     if (exeOut.size() < 4 ||
         _stricmp(exeOut.c_str() + exeOut.size() - 4, ".exe") != 0)
@@ -2612,7 +2651,7 @@ int buildProgram(const std::string& name, const std::string& version,
         " /I\"" + binRoot + "\\..\\src\""
         " /Fobuild\\ " + genCpp +
         " /Fe:" + exeOut + " /link /LIBPATH:\"" + binRoot +
-        "\" coco_interp.lib coco_sema.lib coco_parser.lib"
+        "\" coco_interp.lib coco_vm.lib coco_sema.lib coco_parser.lib"
         " coco_ast.lib coco_lex.lib";
     if (std::getenv("COCO_VERBOSE")) std::cerr << "[cmd] " << cmd << "\n";
     std::cout << "compiling " << exeOut << " ...\n";
@@ -2711,6 +2750,7 @@ int cmdBuild(const std::vector<std::string>& args, size_t from) {
         else if (a == "-S" || a == "-s" || a == "--asm") opts.sasm = true;
         else if (a == "-O" || a == "--obj") opts.obj = true;
         else if (a == "--native" || a == "-N") opts.native_ = true;
+        else if (a == "--asan") opts.asan = true;
         else if (a.rfind("--target=", 0) == 0)
             opts.target = a.substr(9);
         else if (a == "--target" && i + 1 < args.size())
@@ -2905,6 +2945,7 @@ void usage() {
                "lib\n"
          << "           [--native]                 lower scalar user fns to "
                "real C++\n"
+         << "           [--asan]                   build with AddressSanitizer\n"
          << "           [-o <path>]               output path (Go build -o)\n"
         << "  coco targets                     list all supported target "
                "triples\n"
@@ -2928,8 +2969,9 @@ int main(int argc, char** argv) {
         return i < args.size() ? args[i] : std::string();
     };
 
-    if ((cmd == "run" || cmd == "r") && args.size() <= 2) {
-        std::string target = args.size() == 2 ? args[1] : ".";
+    if ((cmd == "run" || cmd == "r") && args.size() >= 2) {
+        std::string target = args[1];
+        std::vector<std::string> progArgs(args.begin() + 2, args.end());
         fs::path file(target);
         // bytecode bundle: fully self-contained, no sources or libs needed
         if (file.extension() == ".cob") {
@@ -2940,7 +2982,7 @@ int main(int argc, char** argv) {
                           << "'\n";
                 return 66;
             }
-            return runProgramSrc(file.string(), msrc, {}, emb);
+            return runProgramSrc(file.string(), msrc, {}, emb, progArgs);
         }
         if (fs::is_directory(file)) {
             Manifest m = readManifest(file);
@@ -2969,7 +3011,7 @@ int main(int argc, char** argv) {
             if (!parent.empty() && parent != "." && parent != scriptDir)
                 dirs.insert(dirs.begin(), parent);
         }
-        return runProgram(file.string(), dirs);
+        return runProgram(file.string(), dirs, {}, progArgs);
     }
     if (cmd == "new" && args.size() >= 2) {
         bool lib = args[1] == "lib";

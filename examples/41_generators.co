@@ -1,0 +1,48 @@
+# 41 - generators & the `yield` statement (phase 5 coroutines)
+# A function containing `yield` is a generator: calling it returns a
+# `gen[T]` value whose elements are produced by the `yield` expressions.
+# Bare `yield` produces `none`; `return` with a value is rejected.
+
+def counter(n) -> gen[int] {          # explicit element type
+    for i in 1..=n {
+        yield i;
+    }
+}
+
+def fib(limit) {                      # inferred -> gen[int]
+    var a = 1;
+    var b = 1;
+    while a <= limit {
+        yield a;
+        (a, b) = (b, a + b);
+    }
+}
+
+def combine(items) {                  # mixed values + a bare yield
+    yield "start";
+    for x in items {
+        yield x;
+    }
+    yield;
+}
+
+def main() {
+    s = 0;
+    for x in counter(5) {
+        s = s + x;
+    }
+    print("sum=" + str(s));
+
+    fibs = fib(50).collect();                    # materialize to a list
+    print("fibs=" + str(fibs));
+
+    even = counter(10).filter((x) => x % 2 == 0);
+    print("even=" + str(even.collect()));
+
+    sq = counter(4).map((x) => x * x).collect();
+    print("sq=" + str(sq));
+
+    print("len=" + str(counter(7).len()));
+    print("mixed=" + str(combine([9, 8]).collect()));
+    print("fresh=" + str(counter(3)));           # repr of a generator
+}

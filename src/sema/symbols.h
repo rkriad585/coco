@@ -51,6 +51,11 @@ struct Symbol {
 
     FuncSig sig;                      // Func
 
+    // Generic Func: type-param name -> resolved default type (`def f[T = int]`).
+    // Empty when the function declares no defaults. Read at call sites so an
+    // unconstrained TypeVar in the return type becomes its default.
+    std::map<std::string, TyP> typeDefaults;
+
     // Struct: fields in decl order; methods resolved separately below.
     std::vector<std::pair<std::string, TyP>> fields;
     std::map<std::string, FuncSig> methods;     // inherent methods (self-bound)
@@ -64,8 +69,14 @@ struct Symbol {
 
     // EnumName: variant name -> resolved payload fields
     std::map<std::string, std::vector<std::pair<std::string, TyP>>> variantPayloads;
+    std::vector<std::string> variants;   // all variant names in declaration order
 
     int homeScope = 0;                // declaring Scope::id (capture detection)
+
+    // `temp <name> <N>`: remaining allowed uses (positive = active budget).
+    // Decremented in checkExpr for each Ident read; declared with tempBudget=N.
+    int tempRemaining = -1;           // -1 = not a temp
+    int tempBudget = 0;               // original budget (diagnostics only)
 };
 
 using SymP = std::shared_ptr<Symbol>;

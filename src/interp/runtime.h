@@ -47,6 +47,11 @@ struct PanicSignal {
     std::vector<std::string> frames;    // source-level call stack (outermost first)
 };
 struct SignalRaise { Value errResult; };
+struct SignalGoto { std::string label; };
+// `gather <expr>,` emits this to the enclosing `gather { ... }` loop.
+// kind==Done appends `value` to the worklist; kind==Stop (from a bare
+// `gather stop,` — not yet exposed) would end collection. Only Done is used.
+struct SignalGather { bool stop = false; Value value; };
 
 extern thread_local std::vector<std::string> g_panicFrames;
 
@@ -72,6 +77,7 @@ public:
     explicit Interpreter(const ast::Stmt& program);
     ~Interpreter();
     Value run();                  // executes module top level, then main()
+    void setProgramArgs(const std::vector<std::string>& args) { argv_ = args; }
 
 private:
     using Expr = ast::Expr;
@@ -89,6 +95,10 @@ private:
     std::vector<ImplEntry> impls_;
 
     Env globals_;
+    // `bucket` store: a separate namespace of parked values (offloaded from
+    // memory). `bucket x = v` parks x here (invisible to normal lookup);
+    // `bucket release x` moves it back to normal variables.
+    std::unordered_map<std::string, Value> bucket_;
     // defer frames are per-thread: spawned threads run runFunc concurrently
     std::mutex defersM_;
     std::map<std::thread::id, std::vector<std::vector<Deferred>>> defers_;
@@ -96,10 +106,21 @@ private:
     std::mutex threadsM_;
     std::vector<std::shared_ptr<ThreadImpl>> threads_;
 
+    // program arguments surfaced as os.args()
+    std::vector<std::string> argv_;
+
     // ---- setup -----------------------------------------------------------------
     void collectProgram(const Stmt& program);
     const Stmt* program_ = nullptr;
     bool collected_ = false;
+
+    // Single inheritance merge: `class Sub extends Base` desugars to a StructDef
+    // whose baseName records the base. We materialize the *effective* derived
+    // node (base fields/protocols merged, derived methods overriding) once in
+    // collectProgram and own it here, so makeStruct/invokeMethod/memberRead work
+    // unchanged against the merged fields+methods.
+    std::vector<std::unique_ptr<ast::Stmt>> inheritedStructNodes_;
+    void mergeInheritance();
 
     // ---- statements / expressions ----------------------------------------------
     void execBlock(const std::vector<ast::StmtP>& body, Env env);
@@ -119,6 +140,7 @@ private:
     void memberWrite(Value& obj, const std::string& name, Value v, int line, int col);
     Value* lvaluePtr(const Expr& e, Env env);
     void assignTo(const Expr& target, Value v, Env env);
+    void bindDecl(const Expr& target, Value v, Env env);
     Deferred prepareDeferred(const Expr& callExpr, Env env);
 
     // operators
@@ -138,6 +160,13 @@ private:
     void iterateSeq(const Value& seq,
                     const std::function<bool(Value&, Env&)>& body, Env env);
     bool matchPat(const ast::Pat& p, const Value& v, Env env);
+
+    // active generator collection stacks: each entry collects the values
+    // produced by `yield` while a generator function's body runs (eager
+    // materialization, per the plan's allowed-divergence note).
+    std::vector<std::vector<Value>*> yieldSinks_;
+    // `gather { ... }` worklist cap (prevents runaway infinite worklists).
+    size_t gatherBudget_ = 1 << 20;
     void bindPat(const ast::Pat& p, const Value& v, Env env);   // assumes matched
     static bool isCmpOp(const std::string& op);
     // builtins / modules / formatting

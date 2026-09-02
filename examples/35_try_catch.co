@@ -1,0 +1,62 @@
+# 35 — try/catch: catchable exceptions         (DO_FIRST_PLAN Phase 1)
+# `try { } catch e { }` runs a block and, if `raise(...)` fires inside it,
+# jumps to the catch block, binding `e` to the raised value.
+# `catch { }` (no binding) discards the value; a try without catch re-raises.
+
+def risky(n: int) -> int {
+    if n < 0 { raise("n must be >= 0"); }
+    return n * n;
+}
+
+def main() {
+    # catchable error, message bound to `e`
+    try {
+        print(risky(-1));
+    } catch e {
+        print("recovered: " + str(e));
+    }
+
+    # normal path: try body runs, catch is skipped
+    try {
+        print(risky(3));
+    } catch e {
+        print("should not print: " + str(e));
+    }
+
+    # discard form: no binding name
+    var discarded = "no";
+    try {
+        raise("swallowed");
+    } catch {
+        discarded = "yes";
+    }
+    print("discarded=" + discarded);
+
+    # non-string payload
+    try {
+        raise(42);
+    } catch n {
+        print("num=" + str(n + 1));
+    }
+
+    # nested try/catch with re-raise
+    var outer = "none";
+    try {
+        try { risky(-5); } catch inner { raise("rethrown: " + str(inner)); }
+    } catch outer_e {
+        outer = str(outer_e);
+    }
+    print("outer=" + outer);
+
+    # catchable inside loops
+    var count = 0;
+    for i in [1, 2, 3] {
+        try {
+            if i == 2 { raise("boom " + str(i)); }
+            count += 1;
+        } catch e {
+            print("in loop: " + str(e));
+        }
+    }
+    print("count=" + str(count));
+}

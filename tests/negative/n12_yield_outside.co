@@ -1,0 +1,2 @@
+# expect: 'yield' outside of a generator function
+yield 5;

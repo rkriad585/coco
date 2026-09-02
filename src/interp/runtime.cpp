@@ -4,6 +4,7 @@
 // declared without capacity queue unboundedly instead of rendezvous-syncing;
 // weak fields keep their target alive while any strong handle exists.
 #include "interp/runtime.h"
+#include "interp/escapes.h"
 #include "lex/lexer.h"
 #include "parser/parser.h"
 #include "sema/checker.h"
@@ -36,6 +37,18 @@ void panicHere(const std::string& msg) {
     sig.msg = msg;
     sig.frames = g_panicFrames;
     throw sig;
+}
+
+// C4996-safe environment lookup (getenv is deprecated on MSVC).
+const char* envGet(const char* name) {
+#if defined(_MSC_VER)
+    size_t needed = 0;
+    char* buf = nullptr;
+    if (_dupenv_s(&buf, &needed, name) == 0 && buf) return buf;
+    return nullptr;
+#else
+    return std::getenv(name);
+#endif
 }
 
 thread_local std::vector<std::string> g_panicFrames;
@@ -86,12 +99,174 @@ struct EnvS {
         }
         return nullptr;
     }
+    // Erase a binding from the frame where it actually lives (walk the chain).
+    // Returns true if found+erased.
+    bool unbind(const std::string& n) {
+        for (EnvS* e = this; e; e = e->parent.get()) {
+            auto it = e->vars.find(n);
+            if (it != e->vars.end()) { e->vars.erase(it); return true; }
+        }
+        return false;
+    }
+    EnvS* root() {
+        EnvS* e = this;
+        while (e->parent) e = e->parent.get();
+        return e;
+    }
 };
 
 static Env makeChild(Env parent) {
     auto e = std::make_shared<EnvS>();
     e->parent = std::move(parent);
     return e;
+}
+
+// ---- AST deep-clone (used by single-inheritance merging, mergeInheritance) --
+// Structs have unique_ptr members (no default copy); these cloners cover
+// precisely the node shapes a class/struct declaration can carry.
+
+static ast::TypeP cloneType(const ast::Type* t) {
+    if (!t) return nullptr;
+    auto c = std::make_unique<ast::Type>();
+    c->kind = t->kind;
+    c->span = t->span;
+    c->name = t->name;
+    c->refMut = t->refMut;
+    if (t->inner) c->inner = cloneType(t->inner.get());
+    for (const auto& g : t->generics) c->generics.push_back(cloneType(g.get()));
+    for (const auto& p : t->params) c->params.push_back(cloneType(p.get()));
+    if (t->ret) c->ret = cloneType(t->ret.get());
+    return c;
+}
+
+static ast::TypeP cloneType(const ast::Type* t);
+static ast::ExprP cloneExpr(const ast::Expr* e);
+static ast::StmtP cloneStmt(const ast::Stmt* s);
+
+static ast::PatP clonePat(const ast::Pat* p) {
+    if (!p) return nullptr;
+    auto c = std::make_unique<ast::Pat>();
+    c->kind = p->kind;
+    c->span = p->span;
+    c->ctorName = p->ctorName;
+    c->bindName = p->bindName;
+    c->restName = p->restName;
+    c->hasRest = p->hasRest;
+    c->inclusive = p->inclusive;
+    c->literal = cloneExpr(p->literal.get());
+    c->lo = clonePat(p->lo.get());
+    c->hi = clonePat(p->hi.get());
+    c->bindType = cloneType(p->bindType.get());
+    c->aliasSub = clonePat(p->aliasSub.get());
+    c->inner = clonePat(p->inner.get());
+    for (const auto& el : p->elems) c->elems.push_back(clonePat(el.get()));
+    for (const auto& f : p->fields) {
+        ast::PatField nf;
+        nf.name = f.name;
+        nf.pat = clonePat(f.pat.get());
+        c->fields.push_back(std::move(nf));
+    }
+    for (const auto& a : p->alts) c->alts.push_back(clonePat(a.get()));
+    return c;
+}
+
+static ast::ExprP cloneExpr(const ast::Expr* e) {
+    if (!e) return nullptr;
+    auto c = std::make_unique<ast::Expr>();
+    c->kind = e->kind;
+    c->span = e->span;
+    c->text = e->text;
+    c->flavor = e->flavor;
+    c->op = e->op;
+    c->nilSafe = e->nilSafe;
+    c->lhs = cloneExpr(e->lhs.get());
+    c->rhs = cloneExpr(e->rhs.get());
+    c->cond = cloneExpr(e->cond.get());
+    if (e->pat) c->pat = clonePat(e->pat.get());
+    c->newType = cloneType(e->newType.get());
+    for (const auto& a : e->args) {
+        ast::CallArg ca;
+        ca.name = a.name;
+        ca.value = cloneExpr(a.value.get());
+        c->args.push_back(std::move(ca));
+    }
+    c->lambdaParams = e->lambdaParams;
+    for (const auto& el : e->elems) c->elems.push_back(cloneExpr(el.get()));
+    for (const auto& pr : e->pairs)
+        c->pairs.emplace_back(cloneExpr(pr.first.get()),
+                              cloneExpr(pr.second.get()));
+    for (const auto& arm : e->matchArms) {
+        ast::MatchArm na;
+        na.pat = clonePat(arm.pat.get());
+        na.guard = cloneExpr(arm.guard.get());
+        for (const auto& b : arm.body) na.body.push_back(cloneStmt(b.get()));
+        c->matchArms.push_back(std::move(na));
+    }
+    return c;
+}
+
+static ast::FieldDecl cloneField(const ast::FieldDecl& f) {
+    ast::FieldDecl nf;
+    nf.weak = f.weak;
+    nf.mutable_ = f.mutable_;
+    nf.pub = f.pub;
+    nf.name = f.name;
+    nf.span = f.span;
+    nf.type = cloneType(f.type.get());
+    nf.defaultValue = cloneExpr(f.defaultValue.get());
+    return nf;
+}
+
+static ast::StmtP cloneStmt(const ast::Stmt* s) {
+    if (!s) return nullptr;
+    auto c = std::make_unique<ast::Stmt>();
+    c->kind = s->kind;
+    c->span = s->span;
+    c->name = s->name;
+    c->pub = s->pub;
+    c->externDef = s->externDef;
+    c->baseName = s->baseName;
+    c->catchParam = s->catchParam;
+    c->ret = cloneType(s->ret.get());
+    c->augOp = s->augOp;
+    c->label = s->label;
+    c->varKw = s->varKw;
+    c->moduleName = s->moduleName;
+    c->importAlias = s->importAlias;
+    c->starImport = s->starImport;
+    c->fromImport = s->fromImport;
+    c->implTrait = cloneType(s->implTrait.get());
+    c->implType = cloneType(s->implType.get());
+    c->declType = cloneType(s->declType.get());
+    c->value = cloneExpr(s->value.get());
+    c->target = cloneExpr(s->target.get());
+    for (const auto& p : s->params) {
+        ast::Param np;
+        np.name = p.name;
+        np.mutable_ = p.mutable_;
+        np.variadic = p.variadic;
+        np.selfParam = p.selfParam;
+        np.span = p.span;
+        np.type = cloneType(p.type.get());
+        np.defaultValue = cloneExpr(p.defaultValue.get());
+        c->params.push_back(std::move(np));
+    }
+    for (const auto& f : s->fields) c->fields.push_back(cloneField(f));
+    for (const auto& e : s->exprs) c->exprs.push_back(cloneExpr(e.get()));
+    for (const auto& b : s->body) c->body.push_back(cloneStmt(b.get()));
+    for (const auto& b : s->elseBody) c->elseBody.push_back(cloneStmt(b.get()));
+    for (const auto& b : s->elifBodies) c->elifBodies.push_back(cloneStmt(b.get()));
+    c->pat = clonePat(s->pat.get());
+    c->cond = cloneExpr(s->cond.get());
+    for (const auto& se : s->seedExprs) c->seedExprs.push_back(cloneExpr(se.get()));
+    for (const auto& arm : s->arms) {
+        ast::MatchArm na;
+        na.pat = clonePat(arm.pat.get());
+        na.guard = cloneExpr(arm.guard.get());
+        for (const auto& b : arm.body) na.body.push_back(cloneStmt(b.get()));
+        c->arms.push_back(std::move(na));
+    }
+    return c;
 }
 
 static int64_t nowMs() {
@@ -143,65 +318,7 @@ static int64_t parseIntText(const std::string& raw) {
 }
 
 // Decodes lexer escape sequences (\n \t \r \\ \' \" \0 \xHH \u{HEX}).
-static std::string decodeEscapes(const std::string& in) {
-    std::string out;
-    for (size_t i = 0; i < in.size(); ++i) {
-        if (in[i] != '\\' || i + 1 >= in.size()) { out += in[i]; continue; }
-        char e = in[++i];
-        switch (e) {
-            case 'n': out += '\n'; break;
-            case 't': out += '\t'; break;
-            case 'r': out += '\r'; break;
-            case '0': out += '\0'; break;
-            case '\\': out += '\\'; break;
-            case '\'': out += '\''; break;
-            case '"': out += '"'; break;
-            case 'x': {
-                if (i + 2 < in.size()) {
-                    out += (char)strtol(in.substr(i + 1, 2).c_str(), nullptr, 16);
-                    i += 2;
-                }
-                break;
-            }
-            case 'u': {
-                if (i + 1 < in.size() && in[i + 1] == '{') {
-                    size_t close = in.find('}', i + 2);
-                    if (close != std::string::npos) {
-                        unsigned cp =
-                            strtoul(in.substr(i + 2, close - i - 2).c_str(), nullptr, 16);
-                        // encode UTF-8
-                        if (cp < 0x80) out += (char)cp;
-                        else if (cp < 0x800) {
-                            out += (char)(0xC0 | (cp >> 6));
-                            out += (char)(0x80 | (cp & 0x3F));
-                        } else {
-                            out += (char)(0xE0 | (cp >> 12));
-                            out += (char)(0x80 | ((cp >> 6) & 0x3F));
-                            out += (char)(0x80 | (cp & 0x3F));
-                        }
-                        i = close;
-                    }
-                }
-                break;
-            }
-            default: out += e;
-        }
-    }
-    return out;
-}
-
-static char32_t decodeCharText(const std::string& in) {
-    std::string d = decodeEscapes(in);
-    if (d.empty()) return '?';
-    unsigned char b0 = (unsigned char)d[0];
-    if (b0 < 0x80) return b0;
-    if ((b0 & 0xE0) == 0xC0 && d.size() >= 2)
-        return ((b0 & 0x1Fu) << 6) | (((unsigned char)d[1]) & 0x3Fu);
-    if ((b0 & 0xF0) == 0xE0 && d.size() >= 3)
-        return ((b0 & 0x0Fu) << 12) | ((((unsigned char)d[1]) & 0x3Fu) << 6) |
-               (((unsigned char)d[2]) & 0x3Fu);
-    return b0;
-}
+// Shared implementation lives in escapes.h (used by tree-walker and VM emitter).
 
 // ---------------------------------------------------------------------------
 // value rendering
@@ -230,12 +347,29 @@ std::string toStr(const Value& v) {
         case VK::Bool:   return v.b ? "true" : "false";
         case VK::Int:    return std::to_string(v.i);
         case VK::Char: {
-            char buf[5] = {};
-            int n = wctomb(buf, v.ch);
-            return n > 0 ? std::string(buf, (size_t)n) : "?";
+            // encode the unicode codepoint as UTF-8 (avoids MSVC wchar_t
+            // warnings from wctomb).
+            std::string s;
+            uint32_t cp = (uint32_t)v.ch;
+            if (cp < 0x80) {
+                s.push_back((char)cp);
+            } else if (cp < 0x800) {
+                s.push_back((char)(0xC0 | (cp >> 6)));
+                s.push_back((char)(0x80 | (cp & 0x3F)));
+            } else if (cp < 0x10000) {
+                s.push_back((char)(0xE0 | (cp >> 12)));
+                s.push_back((char)(0x80 | ((cp >> 6) & 0x3F)));
+                s.push_back((char)(0x80 | (cp & 0x3F)));
+            } else {
+                s.push_back((char)(0xF0 | (cp >> 18)));
+                s.push_back((char)(0x80 | ((cp >> 12) & 0x3F)));
+                s.push_back((char)(0x80 | ((cp >> 6) & 0x3F)));
+                s.push_back((char)(0x80 | (cp & 0x3F)));
+            }
+            return s;
         }
         case VK::Float: {
-            if (std::isnan(v.d)) return "nan";
+            if (std::isnan(v.d)) return "NaN";
             if (std::isinf(v.d)) return v.d > 0 ? "inf" : "-inf";
             for (int prec = 15; prec <= 17; ++prec) {
                 char buf[64];
@@ -327,6 +461,12 @@ std::string repr(const Value& v) {
         case VK::Result:
             return v.variant == "ok" ? "ok(" + repr(v.payload[0]) + ")"
                                      : "err(" + repr(v.payload[0]) + ")";
+        case VK::Gen: {
+            std::string o = "gen(";
+            for (size_t i = 0; i < v.vec->size(); ++i)
+                o += (i ? ", " : "") + repr((*v.vec)[i]);
+            return o + ")";
+        }
         default: return toStr(v);
     }
 }
@@ -362,6 +502,7 @@ static std::string typeName(const Value& v) {
         case VK::Result: return "result";
         case VK::Fn:     return "fn";
         case VK::Builtin:return "builtin";
+        case VK::Gen:    return "generator";
         case VK::Chan:   return "chan";
         case VK::Module: return "module";
         case VK::Ptr:    return "ptr";
@@ -510,8 +651,75 @@ void Interpreter::collectProgram(const Stmt& program) {
                 }
                 break;
             }
+            case ast::StKind::TempDecl:
+            case ast::StKind::BucketDecl:
+            case ast::StKind::LocalDecl:
+            case ast::StKind::GlobalDecl:
+            case ast::StKind::Del:
+            case ast::StKind::Yield:
+                if (s.kind == ast::StKind::Yield)
+                    panicHere("'yield' outside of a generator function");
+                else
+                    exec(s, globals_);
+                break;
             default: break;
         }
+    }
+    mergeInheritance();
+}
+
+// Materialize single-inheritance: for every StructDef whose `baseName` is set,
+// replace its stored node with one carrying the base's fields + methods merged
+// in (derived methods override base methods of the same name; derived fields
+// override base fields of the same name). Runs after structs_ is populated.
+void Interpreter::mergeInheritance() {
+    inheritedStructNodes_.clear();
+
+    for (const auto& child : structs_) {
+        const Stmt& s = *child.second;
+        if (s.baseName.empty()) continue;
+        // Resolve the nearest fully-merged *base* by following the chain.
+        std::function<const Stmt*(const std::string&)> ancestor =
+            [&](const std::string& name) -> const Stmt* {
+            auto sit = structs_.find(name);
+            if (sit == structs_.end()) return &s;       // base missing: keep as-is
+            const Stmt& sd = *sit->second;
+            if (sd.baseName.empty()) return &sd;        // fully-resolved base
+            return ancestor(sd.baseName);               // resolve ancestor first
+        };
+        const Stmt* base = ancestor(s.baseName);
+        if (!base || base == &s) continue;              // cycle/self: avoid infinite
+
+        auto merged = cloneStmt(&s);                    // start from derived node
+        // Fields: base fields first (skipping any overridden by derived), then
+        // derived fields (derived name wins for shadowing).
+        std::vector<ast::FieldDecl> workFields;
+        for (const auto& bf : base->fields) {
+            bool overridden = false;
+            for (const auto& df : s.fields)
+                if (df.name == bf.name) { overridden = true; break; }
+            if (!overridden) workFields.push_back(cloneField(bf));
+        }
+        for (const auto& df : s.fields) workFields.push_back(cloneField(df));
+        merged->fields = std::move(workFields);
+        // Methods: base methods (excluding names overridden by derived), then
+        // derived methods (derived/o virtual dispatch wins).
+        std::vector<std::string> derivedNames;
+        for (const auto& dm : s.body)
+            if (dm->kind == ast::StKind::FuncDef) derivedNames.push_back(dm->name);
+        std::vector<ast::StmtP> workBody;
+        for (const auto& bm : base->body) {
+            if (bm->kind != ast::StKind::FuncDef) continue;
+            bool overridden = false;
+            for (const auto& dn : derivedNames)
+                if (dn == bm->name) { overridden = true; break; }
+            if (!overridden) workBody.push_back(cloneStmt(bm.get()));
+        }
+        for (const auto& dm : s.body) workBody.push_back(cloneStmt(dm.get()));
+        merged->body = std::move(workBody);
+        merged->baseName.clear();                       // now effective
+        inheritedStructNodes_.push_back(std::move(merged));
+        structs_[child.first] = inheritedStructNodes_.back().get();
     }
 }
 
@@ -537,6 +745,11 @@ void Interpreter::installBuiltins() {
         std::cout << out << '\n';
         return Value::none();
     });
+
+    // keyword/named constants used as plain identifiers
+    globals_->vars["nil"] = Value::none();
+    globals_->vars["NaN"] = Value::floating(NAN);
+    globals_->vars["inf"] = Value::floating(INFINITY);
 
     globals_->vars["len"] = biFn({"x"}, [](std::vector<Value>& a) -> Value {
         const Value& v = a[0];
@@ -683,6 +896,11 @@ void Interpreter::installBuiltins() {
     });
     globals_->vars["type"] = biFn({"x"}, [](std::vector<Value>& a) -> Value {
         return Value::str(typeName(a[0]));
+    });
+
+    // repr(x): debug/typed string form (quotes strings, shows containers/fields).
+    globals_->vars["repr"] = biFn({"x"}, [](std::vector<Value>& a) -> Value {
+        return Value::str(repr(a[0]));
     });
 
     // ---- WHY-1 / SP-8: collection & iteration builtins ----------------------
@@ -1254,8 +1472,18 @@ Value Interpreter::moduleMember(const std::string& mod, const std::string& name)
             return biFn({"code"}, [](std::vector<Value>& a) -> Value {
                 std::exit(a[0].k == VK::Int ? (int)a[0].i : 0);
             });
-        if (name == "args")
-            return biFn({}, [](std::vector<Value>&) -> Value { return Value::list(); });
+        if (name == "args") {
+            Value list = Value::list();
+            for (const std::string& a : argv_) list.vec->push_back(Value::str(a));
+            return biFn({}, [list](std::vector<Value>&) -> Value {
+                return list;
+            });
+        }
+        if (name == "getenv")
+            return biFn({"name"}, [](std::vector<Value>& a) -> Value {
+                const char* v = envGet(toStr(a[0]).c_str());
+                return v ? Value::str(v) : Value::none();
+            });
         panicHere("os has no member '" + name + "'");
     }
 
@@ -1271,7 +1499,35 @@ static bool isResultRet(const Stmt& fn) {
 }
 
 void Interpreter::execBlock(const std::vector<ast::StmtP>& body, Env env) {
-    for (const auto& st : body) exec(*st, env);
+    // Fast path: no Label statements in this block, execute straight through.
+    bool hasLabel = false;
+    for (const auto& st : body)
+        if (st->kind == ast::StKind::Label) { hasLabel = true; break; }
+    if (!hasLabel) {
+        for (const auto& st : body) exec(*st, env);
+        return;
+    }
+    // Label-aware path: build label -> statement index, then run with jumps.
+    std::map<std::string, size_t> labels;
+    for (size_t i = 0; i < body.size(); ++i)
+        if (body[i]->kind == ast::StKind::Label) {
+            const std::string& name = body[i]->label;
+            if (labels.count(name)) {
+                panicHere("label '" + name + "' defined more than once");
+            }
+            labels[name] = i;
+        }
+    size_t i = 0;
+    while (i < body.size()) {
+        try {
+            exec(*body[i], env);
+            ++i;
+        } catch (SignalGoto& g) {
+            auto it = labels.find(g.label);
+            if (it == labels.end()) throw;        // not ours → unwind outward
+            i = it->second;                       // land on the labeled statement
+        }
+    }
 }
 
 void Interpreter::exec(const Stmt& s, Env env) {
@@ -1292,9 +1548,123 @@ void Interpreter::exec(const Stmt& s, Env env) {
         case ast::StKind::ConstDecl:
         case ast::StKind::VarDecl: {
             Value v = s.value ? eval(*s.value, env) : Value::none();
-            assignTo(*s.target, std::move(v), env);
+            // a declaration ALWAYS creates a new binding in the current frame
+            // (shadowing) instead of assigning into an outer binding of the
+            // same name — lexical scope semantics, mirrors the checker.
+            bindDecl(*s.target, std::move(v), env);
             return;
         }
+
+        case ast::StKind::LocalDecl: {
+            // force a NEW binding in the current frame (shadow allowed despite
+            // `local` being strict about same-scope re-decl at check time).
+            Value v = s.value ? eval(*s.value, env) : Value::none();
+            if (!s.target || s.target->kind != ast::ExKind::Ident) return;
+            env->vars[s.target->text] = std::move(v);
+            return;
+        }
+
+        case ast::StKind::GlobalDecl: {
+            // write/read the module top-level binding.
+            Value v = s.value ? eval(*s.value, env) : Value::none();
+            if (!s.target || s.target->kind != ast::ExKind::Ident) return;
+            EnvS* root = env->root();
+            if (s.value) root->vars[s.target->text] = std::move(v);
+            return;
+        }
+
+        case ast::StKind::TempDecl: {
+            // like a normal var decl, but carries a compile-time use budget
+            // (enforced in the checker); runtime treats it as an ordinary binding.
+            Value v = s.value ? eval(*s.value, env) : Value::none();
+            if (!s.tempVarName.empty()) env->vars[s.tempVarName] = std::move(v);
+            return;
+        }
+
+        case ast::StKind::BucketDecl: {
+            const std::string& n = s.tempVarName;
+            if (s.bucketRelease) {
+                // move a parked value back to a normal variable.
+                auto it = bucket_.find(n);
+                if (it == bucket_.end()) panicHere("bucket: '" + n + "' is not parked");
+                env->vars[n] = std::move(it->second);
+                bucket_.erase(it);
+            } else {
+                // park: store in the bucket store, remove from normal scope.
+                Value v = s.value ? eval(*s.value, env) : Value::none();
+                env->unbind(n);
+                bucket_[n] = std::move(v);
+            }
+            return;
+        }
+
+        case ast::StKind::Del: {
+            if (s.exprs.empty()) return;
+            const Expr& tgt = *s.exprs[0];
+            switch (tgt.kind) {
+                case ast::ExKind::Ident:
+                    if (!env->unbind(tgt.text))
+                        panicHere("del: undefined variable '" + tgt.text + "'");
+                    return;
+                case ast::ExKind::Index: {
+                    Value cont = eval(*tgt.lhs, env);
+                    if (cont.k == VK::Weak) cont = lockHeap(cont);
+                    Value idx = eval(*tgt.rhs, env);
+                    if (cont.k == VK::Dict) {
+                        for (size_t i = 0; i < cont.map->size(); ++i)
+                            if (valEq((*cont.map)[i].first, idx)) {
+                                cont.map->erase(cont.map->begin() + (long)i);
+                                return;
+                            }
+                        panicHere("del: dict has no key");
+                    }
+                    if (cont.k == VK::List || cont.k == VK::Tuple) {
+                        size_t k = normIndex((int64_t)cont.vec->size(), idx.i);
+                        cont.vec->erase(cont.vec->begin() + (long)k);
+                        return;
+                    }
+                    panicHere("del: unsupported index target");
+                }
+                case ast::ExKind::Member: {
+                    Value base = eval(*tgt.lhs, env);
+                    if (base.k == VK::Weak) base = lockHeap(base);
+                    const std::string& fn = tgt.text;
+                    if (base.k == VK::Struct) {
+                        for (auto it = base.fields.begin(); it != base.fields.end(); ++it)
+                            if (it->first == fn) { base.fields.erase(it); return; }
+                    } else if (base.k == VK::Heap) {
+                        for (auto it = base.heap->fields.begin(); it != base.heap->fields.end(); ++it)
+                            if (it->first == fn) { base.heap->fields.erase(it); return; }
+                    }
+                    panicHere("del: struct has no field '" + fn + "'");
+                }
+                default:
+                    panicHere("del: unsupported target");
+            }
+        }
+
+        case ast::StKind::Yield:
+            if (yieldSinks_.empty())
+                panicHere("'yield' outside of a generator function");
+            yieldSinks_.back()->push_back(
+                !s.exprs.empty() ? eval(*s.exprs[0], env) : Value::none());
+            return;
+
+        case ast::StKind::StructDef: {
+            structs_[s.name] = &s;
+            env->vars[s.name] = Value::module("__struct__:" + s.name);
+            return;
+        }
+
+        case ast::StKind::EnumDef: {
+            enums_[s.name] = &s;
+            env->vars[s.name] = Value::module("__enum__:" + s.name);
+            return;
+        }
+
+        case ast::StKind::TraitDef:
+            traits_[s.name] = &s;
+            return;
 
         case ast::StKind::ExprStmt:
             for (const auto& e : s.exprs) eval(*e, env);
@@ -1364,16 +1734,36 @@ void Interpreter::exec(const Stmt& s, Env env) {
         }
 
         case ast::StKind::If:
+            // block bodies get a fresh child frame so `var` shadowing matches
+            // the checker's lexical scopes (previously the same env was used).
             if (truthy(eval(*s.exprs[0], env)))
-                execBlock(s.body, env);
+                execBlock(s.body, makeChild(env));
             else
-                for (const auto& eb : s.elseBody) exec(*eb, env);
+                for (const auto& eb : s.elseBody) exec(*eb, makeChild(env));
             return;
+
+        case ast::StKind::Try: {
+            try {
+                execBlock(s.body, makeChild(env));
+            } catch (const SignalRaise& sr) {
+                if (s.catchParam.empty()) {
+                    if (!s.elseBody.empty()) execBlock(s.elseBody, makeChild(env));
+                } else {
+                    Env child = makeChild(env);
+                    child->vars[s.catchParam] =
+                        (sr.errResult.payload.empty())
+                            ? Value::none()
+                            : sr.errResult.payload[0];
+                    execBlock(s.elseBody, child);
+                }
+            }
+            return;
+        }
 
         case ast::StKind::While:
             while (truthy(eval(*s.exprs[0], env))) {
                 try {
-                    execBlock(s.body, env);
+                    execBlock(s.body, makeChild(env));
                 } catch (const SignalBreak& b) {
                     if (!b.label.empty() && b.label != s.label) throw;
                     break;
@@ -1382,6 +1772,82 @@ void Interpreter::exec(const Stmt& s, Env env) {
                     continue;
                 }
             }
+            return;
+
+        case ast::StKind::DoWhile:
+            // `do { body } while cond ;` — body runs once, then cond decides.
+            // Search form `do { ... } while (pat = expr) ;` binds the pattern
+            // from cond's value in a fresh scope each round.
+            {
+                bool first = true;
+                for (;;) {
+                    Env child = makeChild(env);
+                    if (!first) {
+                        Value v = eval(*s.cond, env);
+                        if (s.pat) matchPat(*s.pat, v, child);
+                        if (!truthy(v)) break;
+                    }
+                    first = false;
+                    try {
+                        execBlock(s.body, child);
+                    } catch (const SignalBreak& b) {
+                        if (!b.label.empty() && b.label != s.label) throw;
+                        break;
+                    } catch (const SignalContinue& c) {
+                        if (!c.label.empty() && c.label != s.label) throw;
+                    }
+                }
+            }
+            return;
+
+        case ast::StKind::Gather:
+            // Worklist loop: `gather { seeds } { body }`. Seeds are evaluated
+            // first and appended to an empty worklist; each `gather <expr>,`
+            // in the body appends an item. The loop runs until the worklist
+            // empties. A signal result stops collection (success or not).
+            {
+                std::vector<Value> work;
+                for (const auto& se : s.seedExprs)
+                    work.push_back(eval(*se, env));
+                bool overflow = false;
+                for (size_t idx = 0; !overflow; ++idx) {
+                    if (idx >= work.size()) break;
+                    Env child = makeChild(env);
+                    Value item = work[idx];
+                    child->vars["item"] = item;          // each iteration binds `item`
+                    try {
+                        execBlock(s.body, child);
+                    } catch (const SignalGather& g) {
+                        if (g.stop) break;
+                        work.push_back(g.value);          // schedule another trip
+                    } catch (const SignalBreak& b) {
+                        if (!b.label.empty() && b.label != s.label) throw;
+                        break;
+                    } catch (const SignalContinue& c) {
+                        if (!c.label.empty() && c.label != s.label) throw;
+                        continue;
+                    }
+                    if (work.size() > static_cast<size_t>(gatherBudget_))
+                        overflow = true;
+                }
+                if (overflow)
+                    panicHere("gather: worklist exceeded the iteration budget");
+            }
+            return;
+
+        case ast::StKind::GatherStmt:
+            // `gather <expr>,` — append an item to the enclosing worklist.
+            throw SignalGather{false, eval(*s.exprs[0], env)};
+
+        case ast::StKind::Goto:
+            // `goto label;` — unwinds to the block that owns `label:` and jumps
+            // to it (the labeled statement runs, then execution continues). A
+            // Label has no side effect of its own, so jumping to `label_index`
+            // is equivalent to C's "land on the labeled statement".
+            throw SignalGoto{s.label};
+
+        case ast::StKind::Label:
+            if (!s.body.empty()) exec(*s.body[0], env);   // run labeled statement
             return;
 
         case ast::StKind::For: {
@@ -1425,7 +1891,7 @@ void Interpreter::exec(const Stmt& s, Env env) {
             return;
 
         case ast::StKind::Unsafe:
-            execBlock(s.body, env);
+            execBlock(s.body, makeChild(env));
             return;
 
         case ast::StKind::Spawn:
@@ -1895,14 +2361,14 @@ Value cv = eval(*e.lhs, env);
             if (si == structs_.end() &&
                 e.newType->name.rfind("chan", 0) == 0) {
                 auto ch = std::make_shared<ChanImpl>();
-                for (const auto& a : e.args) {
+                if (!e.args.empty()) {
+                    const auto& a = e.args[0];
                     int64_t cap = 0;
                     if (a.value)
                         cap = a.value->kind == ast::ExKind::Int
                                   ? parseIntText(a.value->text)
                                   : eval(*a.value, env).i;
                     ch->cap = cap > 0 ? (size_t)cap : 0;
-                    break;                  // only `cap:` is meaningful
                 }
                 Value cv;
                 cv.k = VK::Chan;
@@ -1941,6 +2407,29 @@ Value cv = eval(*e.lhs, env);
             if (v.k != VK::None && !typeTestMatches(v, t))
                 panicHere("invalid cast to '" + t + "'");
             return v;
+        }
+
+        case ast::ExKind::Match: {
+            Value subj = e.lhs ? eval(*e.lhs, env) : Value::none();
+            Value result = Value::none();
+            bool matched = false;
+            for (const auto& arm : e.matchArms) {
+                Env armEnv = makeChild(env);
+                if (!arm.pat || !matchPat(*arm.pat, subj, armEnv)) continue;
+                if (arm.guard && !truthy(eval(*arm.guard, armEnv))) continue;
+                // execute the arm; its trailing expression statement is the value.
+                for (const auto& st : arm.body) {
+                    if (st == arm.body.back() &&
+                        st->kind == ast::StKind::ExprStmt &&
+                        st->exprs.size() == 1)
+                        result = eval(*st->exprs[0], armEnv);
+                    else
+                        exec(*st, armEnv);
+                }
+                matched = true;
+                break;
+            }
+            return matched ? result : Value::none();
         }
     }
 
@@ -2149,6 +2638,9 @@ Value Interpreter::runFunc(const Stmt* fn, std::vector<Value> pos,
     };
 
     Value ret = Value::none();
+    std::vector<Value> genOut;
+    const bool isGen = fn->isGenerator;
+    if (isGen) yieldSinks_.push_back(&genOut);
     try {
         if (const NativeBody* nb = nativeFuncFor(fn))
             ret = nativeRunBody(*nb, fenv, fn);
@@ -2161,12 +2653,15 @@ Value Interpreter::runFunc(const Stmt* fn, std::vector<Value> pos,
         runDefers();
     } catch (SignalRaise& sraise) {
         runDefers();
+        if (isGen) yieldSinks_.pop_back();
         if (isResultRet(*fn)) return sraise.errResult;
         throw;
     } catch (...) {
         runDefers();
+        if (isGen) yieldSinks_.pop_back();
         throw;
     }
+    if (isGen) yieldSinks_.pop_back();
 
     if (selfOut) {
         for (const auto& p : ps)
@@ -2177,6 +2672,7 @@ Value Interpreter::runFunc(const Stmt* fn, std::vector<Value> pos,
             }
     }
 
+    if (isGen) return Value::gen(std::move(genOut));
     if (isResultRet(*fn)) return Value::resultOk(std::move(ret));
     return ret;
 }
@@ -2184,6 +2680,32 @@ Value Interpreter::runFunc(const Stmt* fn, std::vector<Value> pos,
 Value Interpreter::runLambda(const Expr* lam, std::vector<Value> args,
                              Env closure) {
     Env lenv = makeChild(closure ? closure : globals_);
+
+    if (!lam->lambdaBody.empty()) {
+        // block-bodied closure: bind positionally, fill defaults, execute the
+        // statement block; `return v;` supplies the value (SignalReturn).
+        const auto& cps = lam->closureParams;
+        for (size_t i = args.size(); i-- > 0;) {
+            if (i >= cps.size())
+                panicHere("too many arguments to fn closure");
+            lenv->vars[cps[i].name] = std::move(args[i]);
+        }
+        for (size_t i = args.size(); i < cps.size(); ++i) {
+            const auto& p = cps[i];
+            if (p.defaultValue)
+                lenv->vars[p.name] = eval(*p.defaultValue, lenv);
+            else
+                panicHere("missing argument '" + p.name + "'");
+        }
+        Value ret = Value::none();
+        try {
+            execBlock(lam->lambdaBody, lenv);
+        } catch (SignalReturn& sr) {
+            ret = std::move(sr.v);
+        }
+        return ret;
+    }
+
     const auto& lp = lam->lambdaParams;
     if (args.size() > lp.size()) panicHere("too many lambda arguments");
     if (args.size() < lp.size())
@@ -2202,6 +2724,19 @@ Value Interpreter::invokeMethod(Value obj, const std::string& name,
                                 Env env, int line, int col, Value* selfOut) {
     (void)env;
     if (obj.k == VK::Weak) obj = lockHeap(obj);
+
+    if (obj.k == VK::EnumV) {
+        if (name == "to_int") {
+            auto ei = enums_.find(obj.typeName);
+            if (ei != enums_.end())
+                for (size_t i = 0; i < ei->second->variants.size(); ++i)
+                    if (ei->second->variants[i].name == obj.variant)
+                        return Value::integer(static_cast<int64_t>(i));
+            panicHere("enum '" + obj.typeName + "' variant '" + obj.variant +
+                      "' has no discriminant");
+        }
+        panicHere("enum '" + obj.typeName + "' has no method '" + name + "'");
+    }
 
     if (obj.k == VK::Struct || obj.k == VK::Heap) {
         const std::string& tn =
@@ -2245,6 +2780,8 @@ std::vector<Value> full;
 
 Value Interpreter::memberRead(const Value& obj, const std::string& name,
                               int line, int col) {
+    (void)line;
+    (void)col;
     auto bind = [&](std::vector<std::string> params, BuiltinFn fn) {
         Value b;
         b.k = VK::Builtin;
@@ -2398,12 +2935,57 @@ Value Interpreter::memberRead(const Value& obj, const std::string& name,
                     a[0].vec->push_back(a.size() > 1 ? a[1] : Value::none());
                     return Value::none();
                 });
+            if (name == "len")
+                return bind({}, [](std::vector<Value>& a) -> Value {
+                    return Value::integer((int64_t)a[0].vec->size());
+                });
+            if (name == "extend")
+                return bind({}, [](std::vector<Value>& a) -> Value {
+                    if (a.size() > 1 && (a[1].k == VK::List ||
+                                         a[1].k == VK::Tuple)) {
+                        a[0].vec->insert(a[0].vec->end(), a[1].vec->begin(),
+                                         a[1].vec->end());
+                    }
+                    return Value::none();
+                });
             if (name == "pop")
                 return bind({}, [](std::vector<Value>& a) -> Value {
                     if (a[0].vec->empty()) panicHere("pop from empty list");
                     Value back = a[0].vec->back();
                     a[0].vec->pop_back();
                     return back;
+                });
+            if (name == "shift")
+                return bind({}, [](std::vector<Value>& a) -> Value {
+                    if (a[0].vec->empty()) panicHere("shift from empty list");
+                    Value front = a[0].vec->front();
+                    a[0].vec->erase(a[0].vec->begin());
+                    return front;
+                });
+            if (name == "next")
+                return bind({}, [](std::vector<Value>& a) -> Value {
+                    // next item (head) without consuming; none when empty
+                    if (a[0].vec->empty()) return Value::none();
+                    return (*a[0].vec)[0];
+                });
+            if (name == "fold")
+                return bind({"f", "init"}, [this](std::vector<Value>& a) -> Value {
+                    // xs.fold(f) folds right-to-left using xs[0] as the initial
+                    // accumulator; xs.fold(f, init) starts from init.
+                    const std::vector<Value>& v = *a[0].vec;
+                    size_t i = 0;
+                    Value acc;
+                    if (a.size() > 2 && !a[2].isNone()) acc = a[2];
+                    else {
+                        if (v.empty())
+                            panicHere("fold from empty list requires an initial value");
+                        acc = v[0];
+                        i = 1;
+                    }
+                    Value f = a[1];
+                    for (; i < v.size(); ++i)
+                        acc = callValue(f, {acc, v[i]}, 0, 0);
+                    return acc;
                 });
             if (name == "insert")
                 return bind({}, [](std::vector<Value>& a) -> Value {
@@ -2444,7 +3026,7 @@ Value Interpreter::memberRead(const Value& obj, const std::string& name,
                     for (size_t i = 0; i < a[0].vec->size(); ++i)
                         if (valEq((*a[0].vec)[i], needle))
                             return Value::integer((int64_t)i);
-                    panicHere("index(): value not found");
+                    return Value::integer(-1);
                 });
             if (name == "reverse")
                 return bind({}, [](std::vector<Value>& a) -> Value {
@@ -2516,8 +3098,38 @@ Value Interpreter::memberRead(const Value& obj, const std::string& name,
                                 if (rev)
                                     std::reverse(a[0].vec->begin(),
                                                  a[0].vec->end());
-                                return Value::none();
-                            });
+return Value::none();
+                             });
+            break;
+        }
+
+        case VK::Gen: {
+            if (name == "map")
+                return bind({"f"}, [this](std::vector<Value>& a) -> Value {
+                    std::vector<Value> out;
+                    std::vector<Value> snap = *a[0].vec;
+                    for (auto& el : snap)
+                        out.push_back(callValue(a[1], {el}, 0, 0));
+                    return Value::gen(std::move(out));
+                });
+            if (name == "filter")
+                return bind({"pred"}, [this](std::vector<Value>& a) -> Value {
+                    std::vector<Value> out;
+                    std::vector<Value> snap = *a[0].vec;
+                    for (auto& el : snap)
+                        if (truthy(callValue(a[1], {el}, 0, 0)))
+                            out.push_back(el);
+                    return Value::gen(std::move(out));
+                });
+            if (name == "collect" || name == "to_list")
+                return bind({}, [](std::vector<Value>& a) -> Value {
+                    std::vector<Value> c = *a[0].vec;
+                    return Value::list(std::move(c));
+                });
+            if (name == "len")
+                return bind({}, [](std::vector<Value>& a) -> Value {
+                    return Value::integer((int64_t)a[0].vec->size());
+                });
             break;
         }
 
@@ -2574,6 +3186,38 @@ Value Interpreter::memberRead(const Value& obj, const std::string& name,
                     a[0].map->clear();
                     return Value::none();
                 });
+            if (name == "len")
+                return bind({}, [](std::vector<Value>& a) -> Value {
+                    return Value::integer((int64_t)a[0].map->size());
+                });
+            if (name == "remove")
+                return bind({}, [](std::vector<Value>& a) -> Value {
+                    auto& m = *a[0].map;
+                    const Value& k = a.size() > 1 ? a[1] : Value::none();
+                    for (size_t i = 0; i < m.size(); ++i)
+                        if (valEq(m[i].first, k)) {
+                            m.erase(m.begin() + (long)i);
+                            return Value::none();
+                        }
+                    panicHere("dict.remove(): key not found");
+                });
+            if (name == "contains")
+                return bind({}, [](std::vector<Value>& a) -> Value {
+                    const Value& k = a.size() > 1 ? a[1] : Value::none();
+                    for (auto& kv : *a[0].map)
+                        if (valEq(kv.first, k)) return Value::boolean(true);
+                    return Value::boolean(false);
+                });
+            if (name == "setdefault")
+                return bind({}, [](std::vector<Value>& a) -> Value {
+                    auto& m = *a[0].map;
+                    const Value& k = a.size() > 1 ? a[1] : Value::none();
+                    for (auto& kv : m)
+                        if (valEq(kv.first, k)) return kv.second;
+                    Value dv = a.size() > 2 ? a[2] : Value::none();
+                    m.push_back({k, dv});
+                    return dv;
+                });
             break;
         }
 
@@ -2615,6 +3259,10 @@ Value Interpreter::memberRead(const Value& obj, const std::string& name,
                             if (!found) out.push_back(el);
                         }
                     return Value::set(std::move(out));
+                });
+            if (name == "len")
+                return bind({}, [](std::vector<Value>& a) -> Value {
+                    return Value::integer((int64_t)a[0].vec->size());
                 });
             break;
         }
@@ -2729,6 +3377,34 @@ Value Interpreter::memberRead(const Value& obj, const std::string& name,
                     for (char c : a[0].s)
                         cs.push_back(Value::chr((char32_t)(unsigned char)c));
                     return Value::list(std::move(cs));
+                });
+            if (name == "len")
+                return bind({}, [](std::vector<Value>& a) -> Value {
+                    return Value::integer((int64_t)a[0].s.size());
+                });
+            if (name == "repeat")
+                return bind({}, [](std::vector<Value>& a) -> Value {
+                    int64_t n = a.size() > 1 ? a[1].i : 0;
+                    if (n <= 0) return Value::str("");
+                    std::string out;
+                    out.reserve(a[0].s.size() * (size_t)n);
+                    for (int64_t i = 0; i < n; ++i) out += a[0].s;
+                    return Value::str(out);
+                });
+            if (name == "find")
+                return bind({}, [](std::vector<Value>& a) -> Value {
+                    std::string sub = a.size() > 1 ? toStr(a[1]) : "";
+                    size_t hit = a[0].s.find(sub);
+                    return Value::integer(hit == std::string::npos
+                                              ? -1
+                                              : (int64_t)hit);
+                });
+            if (name == "capitalize")
+                return bind({}, [](std::vector<Value>& a) -> Value {
+                    std::string s = a[0].s;
+                    if (!s.empty())
+                        s[0] = (char)toupper((unsigned char)s[0]);
+                    return Value::str(s);
                 });
             break;
         }
@@ -3155,7 +3831,8 @@ void Interpreter::iterateSeq(const Value& seq,
         }
         case VK::List:
         case VK::Set:
-        case VK::Tuple: {
+        case VK::Tuple:
+        case VK::Gen: {
             std::vector<Value> snapshot = *seq.vec;
             for (auto& item : snapshot) {
                 Env child = makeChild(env);
@@ -3247,13 +3924,13 @@ bool Interpreter::matchPat(const ast::Pat& p, const Value& v, Env env) {
 
         case ast::PatKind::Tuple: {
             if (v.k != VK::Tuple && v.k != VK::List) return false;
-            if (p.restName.empty() && v.vec->size() != p.elems.size())
+            if (!p.hasRest && v.vec->size() != p.elems.size())
                 return false;
-            if (!p.restName.empty() && v.vec->size() < p.elems.size())
+            if (p.hasRest && v.vec->size() < p.elems.size())
                 return false;
             for (size_t i = 0; i < p.elems.size(); ++i)
                 if (!matchPat(*p.elems[i], (*v.vec)[i], env)) return false;
-            if (!p.restName.empty() && p.restName != "_") {
+            if (p.hasRest && !p.restName.empty() && p.restName != "_") {
                 Value rest = v.k == VK::List
                                  ? Value::list({v.vec->begin() + (int)p.elems.size(),
                                                 v.vec->end()})
@@ -3340,13 +4017,13 @@ bool Interpreter::matchPat(const ast::Pat& p, const Value& v, Env env) {
             // front elements; the rest (if named) binds the remaining items.
             if (v.k != VK::List && v.k != VK::Tuple) return false;
             const auto& items = *v.vec;
-            if (p.restName.empty() && items.size() != p.elems.size())
+            if (!p.hasRest && items.size() != p.elems.size())
                 return false;
-            if (!p.restName.empty() && items.size() < p.elems.size())
+            if (p.hasRest && items.size() < p.elems.size())
                 return false;
             for (size_t i = 0; i < p.elems.size(); ++i)
                 if (!matchPat(*p.elems[i], items[i], env)) return false;
-            if (!p.restName.empty() && p.restName != "_") {
+            if (p.hasRest && !p.restName.empty() && p.restName != "_") {
                 Value rest = v.k == VK::List
                                  ? Value::list({items.begin() + (int)p.elems.size(),
                                                 items.end()})
@@ -3393,12 +4070,11 @@ bool Interpreter::matchPat(const ast::Pat& p, const Value& v, Env env) {
             bindPat(p, v, env);
             return true;
         }
+
+        case ast::PatKind::Ref:
+            return p.inner ? matchPat(*p.inner, v, env) : false;
     }
     return false;
-}
-
-static bool isWildcardBind(const ast::Pat& p) {
-    return p.bindName == "_";
 }
 
 void Interpreter::bindPat(const ast::Pat& p, const Value& v, Env env) {
@@ -3502,6 +4178,9 @@ void Interpreter::bindPat(const ast::Pat& p, const Value& v, Env env) {
             }
             return;
         }
+        case ast::PatKind::Ref:
+            if (p.inner) bindPat(*p.inner, v, env);
+            return;
         default:
             return;
     }
@@ -3578,6 +4257,27 @@ void Interpreter::memberWrite(Value& obj, const std::string& name, Value v,
             }
     }
     panicHere("cannot assign to member '" + name + "'");
+}
+
+void Interpreter::bindDecl(const Expr& target, Value v, Env env) {
+    switch (target.kind) {
+        case ast::ExKind::Ident:
+            env->vars[target.text] = std::move(v);
+            return;
+        case ast::ExKind::Tuple:
+        case ast::ExKind::List: {
+            if ((v.k == VK::Tuple || v.k == VK::List) &&
+                v.vec->size() == target.elems.size()) {
+                for (size_t i = 0; i < target.elems.size(); ++i)
+                    bindDecl(*target.elems[i], (*v.vec)[i], env);
+                return;
+            }
+            panicHere("cannot destructure declaration value");
+        }
+        default:
+            assignTo(target, std::move(v), env);
+            return;
+    }
 }
 
 void Interpreter::assignTo(const Expr& target, Value v, Env env) {
@@ -3935,7 +4635,7 @@ void Interpreter::enableVm() {
     };
     vmProg_ = std::make_unique<vm::CompileResult>(
         vm::compileProgram(program_->body, mainFn, uf, bi, mod));
-    if (getenv("COCO_VM_DUMP")) {
+    if (envGet("COCO_VM_DUMP")) {
         for (size_t i = 0; i < vmProg_->prog.funcs.size(); ++i) {
             const vm::VmFunction& F = vmProg_->prog.funcs[i];
             std::cerr << "[vm fn " << i << "] '" << F.name << "' interp="
@@ -4566,7 +5266,7 @@ Value Interpreter::vmRunBody(const vm::VmFunction& vf, Env fenv) {
                 }
                 std::vector<Value> items;
                 switch (seq.k) {
-                    case VK::List: case VK::Set: case VK::Tuple:
+                    case VK::List: case VK::Set: case VK::Tuple: case VK::Gen:
                         items = *seq.vec;
                         break;
                     case VK::Dict:

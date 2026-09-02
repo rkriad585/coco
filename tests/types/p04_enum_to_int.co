@@ -1,0 +1,18 @@
+# 5.3 — enum discriminants & `.to_int()`. Variants may be separated by `,`
+# (or `;`); `variant.to_int()` yields the zero-based discriminant, including
+# for payload-carrying variants.
+enum Direction { North, East; South; West; }
+enum Status {
+    Idle,
+    Running(pid: int),
+    Failed(code: int),
+}
+def main() {
+    print(Direction.North.to_int());
+    print(Direction.East.to_int());
+    print(Direction.South.to_int());
+    print(Direction.West.to_int());
+    print(Status.Idle.to_int());
+    print(Status.Running(pid: 42).to_int());
+    print(Status.Failed(code: 404).to_int());
+}

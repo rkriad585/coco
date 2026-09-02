@@ -1,0 +1,4 @@
+# expect: del: undefined variable 'nope'
+def main() {
+    del nope;
+}

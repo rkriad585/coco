@@ -37,6 +37,7 @@ enum class VK {
     Result,                                   // ok(v) / err(e)
     Fn,                                       // named function or lambda
     Builtin,                                  // builtin global fn / method impl
+    Gen,                                      // generator (yield) — eager list
     Chan, ThreadH, Timer, Module, File, Arena, Ptr,
 };
 
@@ -143,6 +144,11 @@ struct Value {
     }
     static Value module(std::string name) {
         Value x; x.k = VK::Module; x.typeName = std::move(name);
+        return x;
+    }
+    static Value gen(std::vector<Value> vs) {
+        Value x; x.k = VK::Gen;
+        x.vec = std::make_shared<std::vector<Value>>(std::move(vs));
         return x;
     }
 

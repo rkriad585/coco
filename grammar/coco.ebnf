@@ -45,18 +45,27 @@ identifier_start     = "A".."Z" | "a".."z" | "_" ;
 identifier_continue  = identifier_start | "0".."9" ;
 
 (* KEYWORD tokens are matched after IDENTIFIER via exact-set lookup.
-   THIS LIST IS FROZEN for v1 — additions require an RFC + edition bump.     *)
-KEYWORD         = "def"    | "var"   | "let"   | "if"    | "elif"  | "else"
-                | "while"  | "for"   | "in"    | "return"| "break" | "continue"
-                | "match"  | "case"  | "struct"| "enum"  | "trait" | "impl"
-                | "import" | "export"| "pub"   | "defer" | "spawn" | "chan"
-                | "select" | "try"   | "raise" | "unsafe"| "extern"| "new"
-                | "box"    | "self"  | "Self"  | "and"   | "or"    | "not"
-                | "is"     | "as"    | "true"  | "false" | "none"  ;
+   THIS LIST is canonical: it mirrors src/lex/lexer.cpp `isKeyword` exactly
+   (additions are ratified through the milestone process, this edition).     *)
+KEYWORD         = "def"    | "fn"    | "var"   | "let"   | "if"    | "elif"
+                | "else"   | "while" | "for"   | "in"    | "return"| "break"
+                | "continue"| "match"| "case"  | "struct"| "enum"  | "trait"
+                | "impl"   | "import"| "export"| "pub"   | "defer" | "spawn"
+                | "chan"   | "select"| "try"   | "catch" | "raise" | "unsafe"
+                | "extern" | "new"   | "box"   | "self"  | "Self"  | "and"
+                | "or"     | "not"   | "is"    | "as"    | "true"  | "false"
+                | "none"   | "pass"  | "class" | "interface" | "record"
+                | "implements" | "extends" | "dynamic" | "None"
+                | "del"    | "pr"    | "local" | "global"| "temp"
+                | "bucket" ;
 
 (* Contextual (NOT reserved; usable as identifiers):
-   "Self" is contextual-method-position sugar, "get"/"set" future-proofing,
-   primitive type names below are plain IDENTIFIERs bound in the prelude.    *)
+   "yield" is a statement-start word: at statement position it opens a
+   generator `yield [expr]` (see yield_stmt) and it also punctuates the
+   comprehension form (§2 level 1); outside those positions it remains a
+   plain IDENTIFIER. Container/view/error type names below are plain
+   IDENTIFIERs bound in the prelude — list[int], gen[T], result[T, E],
+   option[int] / int?, any / dynamic all parse through base_type.           *)
 
 PRIMITIVE_TYPE_NAME = "int" | "i8" | "i16" | "i32" | "i64"
                     | "u8" | "u16" | "u32" | "u64" | "usize" | "isize"
@@ -174,7 +183,12 @@ func_def        = visibility , "def" IDENTIFIER [ type_params ]
 visibility      = [ "pub" ] ;
 
 type_params     = "[" type_param , { "," , type_param } "]" ;
-type_param      = IDENTIFIER [ "is" type_bound ] ;
+type_param      = IDENTIFIER [ "is" type_bound ] [ "=" type ] ;
+(* Phase 5.1: an optional `= <type>` gives the DECLARED DEFAULT for the type
+   parameter. It is substituted for the TypeVar when a call leaves the TypeVar
+   unconstrained (e.g. `def empty[T = int]() -> list[T]` yields list[int] for
+   an unconstrained call). An explicit call-site argument/constraint always
+   wins over the default. *)
 type_bound      = type ;                       (* trait constraint *)
 
 param_list      = param , { "," , param } [ "," ] ;
@@ -200,7 +214,12 @@ method_def      = func_def ;
 (* ---- Enums ------------------------------------------------------------------ *)
 
 enum_def        = visibility , "enum" IDENTIFIER [ type_params ]
-                  "{" , variant , { "," , variant } , [ "," ] , "}" ;
+                  "{" , variant , { enum_sep , variant } , [ enum_sep ] , "}" ;
+enum_sep        = "," | ";" ;
+(* Phase 5.3: variants may be separated by "," or ";" (C-style); a trailing
+   separator is allowed. Each variant carries an implicit discriminant equal to
+   its zero-based position; `variant.to_int()` yields that discriminant at run
+   time (see §4 notes). *)
 variant         = IDENTIFIER                                            (* unit  *)
                 | IDENTIFIER , "(" [ payload_param ,
                     { "," , payload_param } ] ")" ;                     (* named *)
@@ -229,13 +248,19 @@ var_decl        = "var" target [ ":" type ] [ "=" expr ] ;
 (* ---- Statements ------------------------------------------------------------------ *)
 
 statement       = func_def | labeled_stmt | simple_stmt | compound_stmt ;
-labeled_stmt    = IDENTIFIER , ":" , ( while_stmt | for_stmt ) ;
-(* `label: while ... { }` / `label: for ... { }` — target of `break label;`
-   and `continue label;` (Rust/Go loop-label style).                    *)
+labeled_stmt    = IDENTIFIER , ":" , ( while_stmt | for_stmt )
+                | IDENTIFIER , ":" , statement ;
+(* `label: while ... { }` / `label: for ... { }` — targets of `break label;`
+   and `continue label;` (Rust/Go loop-label style). A plain `label: <stmt>`
+   is a jump label: the target of a safe `goto label;` (a no-op marker whose
+   body is the labeled statement). Disambiguated from `name : Type = value`
+   (annotated binding) by the presence of a top-level `=` after the type.   *)
 
 simple_stmt     = ( import_decl | export_decl | const_decl
                   | assignment | aug_assign | var_decl | return_stmt
                   | raise_stmt | break_stmt | continue_stmt | defer_stmt
+                  | del_stmt | yield_stmt | local_stmt | global_stmt
+                  | temp_stmt | bucket_stmt | goto_stmt | gather_item_stmt
                   | pass_stmt | expr_stmt ) , ";" ;
 
 pass_stmt       = "pass" ;
@@ -256,12 +281,42 @@ return_stmt     = "return" [ expr_list ] ;
 raise_stmt      = "raise" expr ;
 break_stmt      = "break" [ IDENTIFIER ] ;          (* labeled break          *)
 continue_stmt   = "continue" [ IDENTIFIER ] ;       (* labeled continue       *)
+goto_stmt       = "goto" IDENTIFIER , ";" ;
+(* Safe `goto`: may jump to a `label:` declared in the same block or any
+   enclosing block of the same function; a forward jump may not cross a
+   declaring statement (`var`/`const`/`local`/`temp`/`bucket`/defs/imports).
+   It can never jump INTO a nested block or across a function boundary.    *)
+gather_item_stmt = "gather" expr , "," , ";" ;
+(* `gather <expr>,` inside a `gather { ... }` body appends the value to the
+   loop's worklist; only valid within a gather body (checked statically).  *)
 defer_stmt      = "defer" call_expr ;            (* Go-style: call only *)
-del_stmt        = "del" target ;                 (* [PROVISIONAL] *)
+del_stmt        = "del" target ;
+(* `del` removes a binding (del x), a dict key / list index (del d[k]) or a
+   struct field (del obj.f); the runtime panics if the target is undefined. *)
+
+yield_stmt      = "yield" [ expr ] ;
+(* Statement form of generator functions (contextual word). A `def` whose own
+   body contains a `yield` returns gen[T]; bare `yield` produces `none`.  *)
+
+local_stmt      = "local" IDENTIFIER [ ":" type ] [ "=" expr ] ;
+global_stmt     = "global" IDENTIFIER [ ":" type ] [ "=" expr ] ;
+(* Strict-scope bindings: `local x` rebinds a fresh `x` in the current frame
+   (shadowing an outer binding); `global x` (re)binds the module-global x. *)
+
+temp_stmt       = "temp" IDENTIFIER INT_LITERAL [ ":" type ] "=" expr ;
+(* Compile-time usage budget: the value may be read at most INT_LITERAL
+   (1..10) times; the (N+1)-th read is a compile error.                   *)
+
+bucket_stmt     = "bucket" "release" IDENTIFIER
+                | "bucket" IDENTIFIER [ "=" expr ] ;
+(* Park/release store: `bucket x = v` moves `x` into the bucket namespace
+   (invisible to normal lookup); `bucket release x` moves it back.        *)
+
 expr_stmt       = expr ;
 
-compound_stmt   = if_stmt | while_stmt | for_stmt | match_stmt
-                | select_stmt | unsafe_block | spawn_stmt ;
+compound_stmt   = if_stmt | while_stmt | do_while_stmt | for_stmt
+                | match_stmt | select_stmt | unsafe_block | spawn_stmt
+                | gather_stmt ;
 
 if_stmt         = "if" expr block { "elif" expr block }
                 | if_stmt , "else" [ "if" expr block | block ] ;
@@ -269,6 +324,8 @@ if_stmt         = "if" expr block { "elif" expr block }
    `elif` is accepted as a legacy alias for `else if`.                       *)
 
 while_stmt      = "while" expr block ;
+
+doe_while_stmt  = "do" block "while" ( expr | pattern , "=" , expr ) , ";" ;
 
 for_stmt        = "for" pattern "in" expr block ;
 
@@ -290,13 +347,18 @@ spawn_stmt      = "spawn" call_expr ;            (* fire-and-forget spawn *)
 
 expr_list       = expr , { "," , expr } [ "," ] ;
 
-expr            = lambda_expr | conditional_expr | comprehension_expr | orexpr ;
+expr            = closure_expr | lambda_expr | conditional_expr
+                | comprehension_expr | orexpr ;
 
 lambda_expr     = param_list_no_default , "=>" , expr ;
 param_list_no_default = "(" [ IDENTIFIER { "," IDENTIFIER } ] ")" ;
-(* Anonymous multi-statement closures: bind a nested named `def` instead.
-   Block bodies are reserved for named `def`s and cannot occur inside an
-   expression statement — frozen decision, §4 note 10. *)
+
+(* Block-bodied closure: `fn (params) [-> ret] { stmts }`. The `fn` here is a
+   contextual prefix inside an expression — a `(` right after `fn` signals the
+   closure, otherwise `fn` starts a function declaration. The block runs in a
+   fresh scope; `return v;` supplies the value (SignalReturn). Closures capture
+   the defining environment. §4 note 10. *)
+closure_expr    = "fn" , param_list , [ "->" , type ] , block ;
 
 conditional_expr= orexpr
                 | "if" expr "{" expr "}" "else" "{" expr "}" ;
@@ -421,9 +483,11 @@ type_postfix    = "?" ;               (* option sugar:  int? == option[int]  *)
 # =============================================================================
 # §4 RESOLVED NOTES (freeze record)
 # =============================================================================
-# 1. Keywords frozen exactly as listed in §1; `go` REMOVED from consideration
-#    (`spawn` covers it). Primitive type names are prelude identifiers, not
-#    reserved words, keeping them shadowable in exotic numeric libraries.
+# 1. Keywords are canonical per §1 (mirrors the lexer); `go` REMOVED from
+#    consideration (`spawn` covers it). Primitive type names are prelude
+#    identifiers, not reserved words, keeping them shadowable in exotic
+#    numeric libraries; container/view names (list, gen, result, option/?, any)
+#    resolve in the checker the same way.
 # 2. Blocks are brace-delimited `{ ... }`; simple statements end with `;`.
 #    Newlines and indentation are insignificant (layout-free, C/Go/Rust style).
 #    `elif` is accepted as a legacy alias for `else if`.
@@ -443,7 +507,10 @@ type_postfix    = "?" ;               (* option sugar:  int? == option[int]  *)
 #    no increment/decrement ++/--, no implicit bool→int, no goto.
 # 10. Anonymous functions are single-expression lambdas ONLY (`(x) => e`).
 #     Multi-statement closures bind a nested named `def`.
-# 11. `pass` keyword added for empty blocks; `del` deferred to v2 entirely.
+# 11. `pass` keyword covers empty blocks. `del` is implemented (bindings, dict
+#     keys, list indexes, struct fields); `local`/`global` strict scoping;
+#     `temp n N: T = v` compile-time use budgets; `bucket` park/release
+#     namespace (see statements above).
 # 12. Struct fields accept optional leading `var` (mutable field) / `weak`.
 # 13. C-string literal `c"…"` added for FFI (NUL-terminated UTF-8).
 # 14. `<-expr` receive operator valid ONLY inside select arms (chan_op).
@@ -454,6 +521,37 @@ type_postfix    = "?" ;               (* option sugar:  int? == option[int]  *)
 #     and `continue l;` exit/skip that labeled loop from nested bodies
 #     (Go/Rust loop-label style). Unlabeled `break`/`continue` act on the
 #     innermost loop as before.
+# 17. `bucket` is a RESERVED WORD (ratified by decision; it is NOT usable as
+#     an identifier, hence the example-14 helper rename to `hash_bucket`).
+# 18. A `def` whose own body contains a `yield` is a GENERATOR FUNCTION: the
+#     call evaluates to a gen[T] (declared `-> gen[T]`, or inferred when the
+#     `->` type is omitted). `return value;` inside a generator is rejected;
+#     bare `return;` / falling off the end ends generation. Nested function
+#     bodies do not inherit the generator context (their own yields mark them).
+# 19. `yield` is CONTEXTUAL — reserved only at statement start (yield_stmt)
+#     and inside comprehension forms (§2 level 1); it remains a valid
+#     identifier elsewhere.
+# 20. `temp`, `local`, `global`, `pr` are reserved words, each acting ONLY in
+#     statement position; a `pr` (module-private) modifier is a prefix on
+#     declarations (visibility guard, enforced at the module-export milestone).
+# 21. Phase 5.1 — DEFAULT TYPE PARAMETERS: `def f[T = D]` declares D as the
+#     fallback type for T. It is a static error to name a non-type in D. The
+#     default substitutes ONLY where a call leaves T unconstrained (constraint
+#     unification wins). Substitution rebuilds the nominal node; it never
+#     mutates the function's declared signature. Generics without defaults keep
+#     plain inference TypeVar semantics.
+# 22. Phase 5.3 — ENUM DISCRIMINANTS & to_int(): variants enumerate in
+#     declaration order; the i-th variant has discriminant i. `enum_val.to_int()`
+#     (§2 postfix member + call) yields the discriminant and is typed `int`
+#     (unlike string `.to_int()`, which returns `int?`). Payload-carrying
+#     variants are counted too (their unit positions still enumerate).
+# 23. Phase 5.4 — MATCH EXHAUSTIVENESS (safety default): enum matches must cover
+#     every variant (a `case _` wildcard satisfies this); integer/char matches
+#     must end in a `case _` arm. Violations are ERRORS, not warnings.
+# 24. Phase 5.5 — BORROW ESCAPE (conservative): an address-of-local `&x` may not
+#     escape the frame — returned, passed as a call argument, or stored into a
+#     member/index/container target (a store into a plain local variable stays
+#     in scope and is allowed). Violations are E-BORROW-ESCAPE errors.
 # =============================================================================
 
 EOF_MARKER      = end_of_file ;

@@ -1,0 +1,5 @@
+# expect: 'gather <expr>,' may only appear inside a gather { } loop
+def main() {
+    gather 5,
+    print("hi");
+}

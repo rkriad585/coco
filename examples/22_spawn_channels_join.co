@@ -1,29 +1,37 @@
 # 22 — Concurrency: spawn, channels, join   (plan §7)
-def worker(id: int, jobs: chan[int], done: chan[string]) {
+def worker(jobs: chan[int], done: chan[int]) {
     for j in jobs { # recv loop until channel closes
-        done.send(f"worker {id} finished job {j}");
+        done.send(j);
 
 }
+
 }
 def main() {
     jobs = chan[int](cap: 8); # buffered channel
-    done = chan[string](); # unbuffered
+    done = chan[int](); # unbuffered
 
     handles = [];
-    for i in 1..=3 {
-        h = spawn worker(i, jobs, done); # lightweight green thread
+    for _ in 1..=3 {
+        h = spawn worker(jobs, done); # lightweight green thread
         handles.append(h);
 
 }
+
     for j in 1..=5 {
         jobs.send(j);
 }
     jobs.close(); # signals end-of-stream to receivers
 
+    results = [];
     for _ in 1..=5 {
-        print(done.recv()); # blocking receive
+        results.append(done.recv()); # blocking receive
+}
+    results.sort(); # which worker claims which job is racy; sorted jobs are deterministic
+    for r in results {
+        print("job " + str(r) + " finished");
 
 }
+
     for h in handles {
         h.join(); # wait for thread exit
 }

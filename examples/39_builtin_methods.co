@@ -1,0 +1,48 @@
+# 39 — builtin method forms   (DO_FIRST_PLAN Phase 3 tail)
+# length / containment / mutation helpers on string, list, dict, and set,
+# all typechecked by the checker and dispatched at runtime.
+
+def main() {
+    # ---- string
+    s = "Hello World";
+    print(s.len() == 11);
+    print("abc".repeat(3));
+    print("Hello World".contains("World"));
+    print("Hello World".starts_with("Hello"));
+    print("Hello World".ends_with("World"));
+    print("a-b-c".replace("-", "+"));
+    print("Hello World".find("World"));        # 6
+    print("Hello World".find("zzz"));          # -1 when absent
+    print("hello".capitalize());
+
+    # ---- list
+    xs = [10, 20, 30];
+    xs.append(40);
+    print(xs.len() == 4);
+    print(xs.contains(30));
+    print(xs.index(40));                       # 3
+    xs.extend([50, 60]);
+    xs.reverse();
+    print(xs);
+    print(xs.pop());                           # last element
+    print(xs.remove(20));                      # removes 20, returns it
+    xs.clear();
+    print(xs.len() == 0);
+
+    # ---- dict
+    d = {"one": 1, "two": 2};
+    print(d.len() == 2);
+    print(d.contains("two"));
+    d.setdefault("three", 3);
+    d.remove("two");
+    print(d.get("three"));
+
+    # ---- set
+    st = {1, 2, 3};
+    st.add(4);
+    print(st.len() == 4);
+    print(st.contains(3));
+    st.remove(3);
+    print(st.contains(3));
+    print(st.len());
+}

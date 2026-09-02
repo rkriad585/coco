@@ -37,12 +37,16 @@ const char* tokName(Tok t) {
 
 bool isKeyword(std::string_view ident) {
     static const std::string_view kKeywords[] = {
-        "def", "var", "let", "if", "elif", "else", "while", "for", "in",
+        "def", "fn", "var", "let", "if", "elif", "else", "while", "for", "in",
         "return", "break", "continue", "match", "case", "struct", "enum",
         "trait", "impl", "import", "export", "pub", "defer", "spawn", "chan",
-        "select", "try", "raise", "unsafe", "extern", "new", "box", "self",
+        "select", "try", "raise", "catch", "unsafe", "extern", "new", "box", "self",
         "Self", "and", "or", "not", "is", "as", "true", "false", "none",
-        "pass",
+        "pass", "class", "interface", "record", "implements", "extends",
+        "dynamic",
+        "None",
+        "del", "pr", "local", "global", "temp",
+        "bucket",
     };
     for (std::string_view k : kKeywords)
         if (k == ident) return true;

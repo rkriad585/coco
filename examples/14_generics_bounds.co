@@ -22,7 +22,7 @@ impl Hashable for Key {
 
 }
 }
-def bucket[T is Hashable](item: T) -> u64 { # trait bound checked at DEFINITION site
+def hash_bucket[T is Hashable](item: T) -> u64 { # trait bound checked at DEFINITION site
     return item.hash() % 256;
 
 }
@@ -31,5 +31,5 @@ def main() {
     print(first(["a", "b"])); # list[string]
     p = Pair(first: 1, second: "two");
     print(p.first, p.second);
-    print(bucket(Key(code: 7)));
+    print(hash_bucket(Key(code: 7)));
 }

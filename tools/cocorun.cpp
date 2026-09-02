@@ -113,7 +113,8 @@ static bool unpackCob(const std::string& path, std::string& mainSrc,
 // faster (see scripts/bench.ps1). Use --no-vm to force the tree-walker.
 static bool g_useVm = true;
 static int runSources(const std::string& label, const std::string& src,
-                      const std::map<std::string, std::string>* embedded) {
+                      const std::map<std::string, std::string>* embedded,
+                      const std::vector<std::string>& progArgs) {
     coco::DiagEngine diags;
     auto toks = coco::Lexer(src, label, diags).lexAll();
     int ret = 0;
@@ -132,6 +133,7 @@ static int runSources(const std::string& label, const std::string& src,
                     if (embedded)
                         for (const auto& [name, esrc] : *embedded)
                             interp.addEmbeddedSource(name, esrc);
+                    interp.setProgramArgs(progArgs);
                     if (g_useVm) interp.enableVm();   // PLAN Phase 4 bytecode VM
                     coco::interp::Value r = interp.run();
                     ret = r.k == coco::interp::VK::Int ? (int)r.i : 0;
@@ -169,20 +171,28 @@ static int runSources(const std::string& label, const std::string& src,
 
 int main(int argc, char** argv) {
     std::string file;
+    bool afterFile = false;
+    std::vector<std::string> progArgs;
     for (int i = 1; i < argc; ++i) {
         std::string a = argv[i];
+        if (afterFile) {
+            progArgs.push_back(a);
+            continue;
+        }
         if (a == "-h" || a == "--help") {
-            std::cout << "usage: cocorun [--no-vm|--vm] <file.co | file.cob>\n"
+            std::cout << "usage: cocorun [--no-vm|--vm] <file.co | file.cob> [args...]\n"
                          "  (the bytecode-VM accelerator is the default; --no-vm\n"
-                         "   forces the tree-walker interpreter, --vm re-enables)\n";
+                         "   forces the tree-walker interpreter, --vm re-enables)\n"
+                         "  arguments after <file> are passed to the program as os.args()\n";
             return 0;
         }
         if (a == "--vm") { g_useVm = true; continue; }
         if (a == "--no-vm") { g_useVm = false; continue; }
-        if (file.empty()) file = a;
+        file = a;
+        afterFile = true;
     }
     if (file.empty()) {
-        std::cerr << "usage: cocorun <file.co | file.cob>\n";
+        std::cerr << "usage: cocorun <file.co | file.cob> [args...]\n";
         return 2;
     }
 
@@ -197,10 +207,10 @@ int main(int argc, char** argv) {
             std::cerr << "cocorun: invalid bytecode bundle '" << file << "'\n";
             return 66;
         }
-        return runSources(file, msrc, &emb);
+        return runSources(file, msrc, &emb, progArgs);
     }
 
     std::string src;
     if (!readFile(file, src)) return 2;
-    return runSources(file, src, nullptr);
+    return runSources(file, src, nullptr, progArgs);
 }

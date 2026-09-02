@@ -1,0 +1,9 @@
+# expect: generator functions cannot 'return' a value; use 'yield'
+def gen() {
+    yield 1;
+    return 42;
+}
+
+def main() {
+    print(gen().collect());
+}

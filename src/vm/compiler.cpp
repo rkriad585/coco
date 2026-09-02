@@ -15,6 +15,7 @@
 
 #include "vm/compiler.h"
 #include "vm/bytecode.h"
+#include "interp/escapes.h"
 
 #include <unordered_map>
 #include <unordered_set>
@@ -120,7 +121,7 @@ public:
                 if (!s.exprs.empty()) scanTarget(*s.exprs[0]);
                 break;
             case StKind::If:
-                for (const auto& e : s.elifConds) { /* conds don't bind */ }
+                for ([[maybe_unused]] const auto& e : s.elifConds) { /* conds don't bind */ }
                 for (const auto& st : s.body) scanStmt(*st);
                 for (const auto& st : s.elifBodies) scanStmt(*st);
                 for (const auto& st : s.elseBody) scanStmt(*st);
@@ -128,6 +129,10 @@ public:
             case StKind::While:
             case StKind::Unsafe:
                 for (const auto& st : s.body) scanStmt(*st);
+                break;
+            case StKind::Try:
+                for (const auto& st : s.body) scanStmt(*st);
+                for (const auto& st : s.elseBody) scanStmt(*st);
                 break;
             case StKind::For:
                 if (s.pat && s.pat->kind == ast::PatKind::Bind && !s.pat->bindName.empty())
@@ -223,6 +228,10 @@ public:
                         break;
                     case StKind::While: case StKind::Unsafe:
                         for (const auto& st : s.body) scan(*st, depth + 1);
+                        break;
+                    case StKind::Try:
+                        for (const auto& st : s.body) scan(*st, depth + 1);
+                        for (const auto& st : s.elseBody) scan(*st, depth + 1);
                         break;
                     default: break;
                 }
@@ -401,6 +410,11 @@ public:
                 // the tree-walker; out of the VM core slice -> fall back.
                 em.f.interpreted = true;
                 break;
+            case StKind::Try:
+                // try/catch is exception-aware control flow: run the
+                // tree-walker (same policy as Raise/Match/Select/Defer).
+                em.f.interpreted = true;
+                break;
             default: em.f.interpreted = true; break;
         }
     }
@@ -417,13 +431,13 @@ public:
         switch (e.kind) {
             case ExKind::Int: em.emit(OP_INT, em.constId(Value::integer(parseInt(e.text)))); break;
             case ExKind::Float: em.emit(OP_FLOAT, em.constId(Value::floating(strtod(e.text.c_str(), nullptr)))); break;
-            case ExKind::CharLit: em.emit(OP_CHAR, em.constId(Value::str(e.text))); break;
+            case ExKind::CharLit: em.emit(OP_CHAR, em.constId(Value::chr(decodeCharText(e.text)))); break;
             case ExKind::Str: {
                 switch (e.flavor) {
                     case ast::StrFlavor::Raw:  em.emit(OP_STR_RAW,   em.constId(Value::str(e.text))); break;
-                    case ast::StrFlavor::Byte: em.emit(OP_STR_BYTES, em.constId(Value::str(e.text))); break;
-                    case ast::StrFlavor::C:    em.emit(OP_STR_C,     em.constId(Value::str(e.text))); break;
-                    default:                   em.emit(OP_STR,       em.constId(Value::str(e.text))); break;
+                    case ast::StrFlavor::Byte: em.emit(OP_STR_BYTES, em.constId(Value::str(decodeEscapes(e.text)))); break;
+                    case ast::StrFlavor::C:    em.emit(OP_STR_C,     em.constId(Value::str(decodeEscapes(e.text)))); break;
+                    default:                   em.emit(OP_STR,       em.constId(Value::str(decodeEscapes(e.text)))); break;
                 }
                 break;
             }

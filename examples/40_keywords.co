@@ -1,0 +1,56 @@
+# 40 — memory & scoping keywords   (new data types / control / storage set)
+# `None` type, `del` (vars + dict keys + list indexes + struct fields),
+# `pr` private declarations, `local` / `global` strict scoping, `temp`
+# compile-time use budgets, and the `bucket` park/release namespace.
+
+pr def secret() -> string { return "hidden"; }   # private — explicit module-local
+
+var counter = 0;                                  # module-top-level global
+
+class Gadget { var label: string = ""; var n: int = 0; }
+
+def bump(by) {
+    global counter;
+    counter = counter + by;
+}
+
+def main() {
+    # ---- None type
+    var nada: None = none;
+    print("None=" + str(nada));
+
+    # ---- del: variables, dict keys, list indexes, struct fields
+    x = 42;
+    del x;
+    d = {"a": 1, "b": 2, "c": 3};
+    del d["b"];
+    print("dict=" + str(d));
+    xs = [1, 2, 3, 4];
+    del xs[2];
+    print("list=" + str(xs));
+    g = Gadget(label: "hi", n: 3);
+    print("before=" + g.label);
+    del g.label;                                      # removes instance field
+    print("gadget-n-after-del=" + str(g.n));
+
+    # ---- pr & global
+    print("pr=" + secret());                      # private fn callable in-module
+    bump(5);
+    bump(7);
+    print("counter=" + str(counter));
+
+    # ---- local (strict: same-scope re-decl is a compile error)
+    local count = 1;
+    print("local=" + str(count));
+
+    # ---- temp (compile-time use budget; use #(N+1) is a compile error)
+    temp scratch 3: int = 100;
+    print("t1=" + str(scratch));
+    print("t2=" + str(scratch + 1));
+    print("t3=" + str(scratch));
+
+    # ---- bucket (separate namespace: park / release)
+    bucket heavy = [1, 2, 3, 4, 5];                # offloaded, invisible to lookup
+    bucket release heavy;                          # bring it back
+    print("bucket=" + str(heavy));
+}

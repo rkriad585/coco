@@ -9,6 +9,13 @@ if(NOT CMAKE_BUILD_TYPE)
     set(CMAKE_BUILD_TYPE Debug)
 endif()
 
+# COCO_ASAN=ON instruments every target with AddressSanitizer (scripts/asanall.ps1).
+option(COCO_ASAN "Build with AddressSanitizer" OFF)
+if(COCO_ASAN)
+    add_compile_options(-fsanitize=address -fno-omit-frame-pointer -g)
+    add_link_options(-fsanitize=address)
+endif()
+
 add_library(coco_support INTERFACE)
 target_include_directories(coco_support INTERFACE ${CMAKE_CURRENT_SOURCE_DIR}/src)
 
@@ -30,6 +37,7 @@ target_link_libraries(coco_parser PUBLIC coco_ast coco_lex)
 
 add_library(coco_sema STATIC
     src/sema/checker.cpp
+    src/sema/borrow.cpp
 )
 target_link_libraries(coco_sema PUBLIC coco_parser)
 

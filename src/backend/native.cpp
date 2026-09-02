@@ -334,6 +334,8 @@ private:
     void emitFunction(const ast::Stmt& s, const NativeFunc& nf) {
         cur_ = &nf;
         localTypes_.clear();
+        for (size_t i = 0; i < nf.params.size(); ++i)
+            localTypes_[nf.params[i]] = nf.pTypes[i];
         for (auto& [name, fn] : *lowered_) calleeFunc_[fn.name] = &fn;
         // scalar-core signature: plain params -> plain scalar return. The
         // registration thunk (out_registerAll) only boxes/unboxes at the edges;
@@ -389,7 +391,8 @@ private:
             }
             case StKind::Assign:
             case StKind::AugAssign: {
-                std::string name = cIdent(s.exprs[0]->text, "v_");
+                const std::string& cname = s.exprs[0]->text;
+                std::string name = cIdent(cname, "v_");
                 std::string val;
                 if (s.kind == StKind::AugAssign) {
                     // rebuild target op value with binop semantics
@@ -397,7 +400,16 @@ private:
                 } else {
                     val = emitExpr(*s.exprs[1]);
                 }
-                out_ << pad << name << " = " << val << ";\n";
+                auto lf = localTypes_.find(cname);
+                if (lf != localTypes_.end()) {
+                    out_ << pad << name << " = " << val << ";\n";
+                } else {
+                    // first (possibly implicit) binding of a mutable local:
+                    // emit the declaration so later assignments stay plain.
+                    const std::string ty = cppTy(typeOf(*s.exprs[0]));
+                    localTypes_[cname] = ty;
+                    out_ << pad << ty << " " << name << " = " << val << ";\n";
+                }
                 return;
             }
             case StKind::Return: {

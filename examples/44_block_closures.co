@@ -1,0 +1,74 @@
+# 44 — Block-bodied closures (`fn (x) { stmts }`): statement closures with
+#      local variables, typed parameters, explicit `-> T` returns, captures,
+#      and use as higher-order function arguments. (DO_FIRST_PLAN Phase 4)
+#
+# Expected output:
+#   dmap=[3, 5, 7]
+#   typed=3
+#   scale=700
+#   counter=1 2 3
+#   early=6
+#   pipeline=8
+#   folded=160
+#   arrow=81
+
+def dmap(xs, f: fn(int) -> int) -> list {
+    out = [];
+    for x in xs { out.append(f(x)); }
+    return out;
+}
+
+def makeScaler(factor) {
+    return fn (x: int) -> int { return x * factor; };   # captures `factor`
+}
+
+def main() {
+    # block closure with a local variable and an explicit return
+    ys = dmap([1, 2, 3], fn (v) {
+        doubled = v * 2;
+        return doubled + 1;
+    });
+    print("dmap=" + str(ys));
+
+    # fully typed closure passed straight to a higher-order function
+    sum_ = dmap([1, 2], fn (a) { return a; }).fold(
+        fn (acc, b) { return acc + b; });
+    typed = sum_;
+    print("typed=" + str(typed));
+
+    # closure returned from a function; captured state stays alive
+    scale = makeScaler(100);
+    print("scale=" + str(scale(7)));
+
+    # mutable capture: the closure keeps its own counter
+    count = 0;
+    bump = fn () {
+        count = count + 1;
+        return count;
+    };
+    print("counter=" + str(bump()) + " " + str(bump()) + " " + str(bump()));
+
+    # `return` in the middle of the block short-circuits the rest
+    probe = fn (n) {
+        if n > 10 { return 6; }
+        return n;
+    };
+    print("early=" + str(probe(99)));
+
+    # block closures compose: mini pipeline of transforms
+    pipe = fn (x: int) -> int {
+        y = x + 1;
+        z = y * 2;
+        return z;
+    };
+    thru = dmap([3, 2], pipe);       # pipe(3)=8, pipe(2)=6
+    print("pipeline=" + str(thru.next()));   # next item (head) -> 8
+
+    # fold with an explicit initial accumulator
+    folded = [10, 20, 30].fold(fn (acc, v) { return acc + v; }, 100);
+    print("folded=" + str(folded));
+
+    # arrow lambdas still work unchanged: (x) => e
+    sq = (x) => x * x;
+    print("arrow=" + str(sq(9)));
+}

@@ -1,0 +1,33 @@
+# 37 — dynamic typing: `any` / `dynamic` alias   (SYNTAX_PLAN SP-5 / Phase 2)
+# `var x: any = ...` (or `: dynamic`) holds any value; the checker defers and
+# the runtime dispatches on the value's real tag at run time (duck typing).
+# Reassigning to a different type is fine, and method calls follow the value.
+
+class Widget {
+    var w: int = 3;
+    def size(self) -> int { return self.w * 2; }
+}
+
+def show(v: any) {
+    print("show(" + repr(v) + ")");
+}
+
+def main() {
+    var a: any = 5;
+    a = "hi";
+    print("a = " + str(a));
+
+    var d: dynamic = 3.5;          # dynamic is an alias for any
+    d = 42;
+    print("d = " + str(d));
+
+    var lst: any = [1, 2, 3];
+    print("len(lst) = " + str(len(lst)));
+
+    w = Widget();
+    var x: any = w;
+    print("widget size = " + str(x.size()));   # duck-typed method call
+
+    show("text");
+    show([1, 2]);
+}

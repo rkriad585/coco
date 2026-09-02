@@ -1,0 +1,8 @@
+# expect: label 'dup' is defined more than once
+def main() {
+    goto dup;
+dup:
+    print("a");
+dup:
+    print("b");
+}

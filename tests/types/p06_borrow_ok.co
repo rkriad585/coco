@@ -1,0 +1,12 @@
+# 5.5 — conservative borrow pass accepts borrows that do not escape. Taking
+# an address of a local and *not* returning/storing/passing it is fine; only an
+# escaping `&local` (return || store || call-arg) is flagged E-BORROW-ESCAPE.
+def read_local(p: *int) -> int {
+    return *p;
+}
+def main() {
+    x = 42;
+    p = &x;                 # address taken, stored in local p — not escaped
+    print(read_local(p));
+    print(x);
+}

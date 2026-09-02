@@ -1,0 +1,83 @@
+# 36 — OOP facade: class / interface / record / fn   (DO_FIRST_PLAN Phase 2)
+# `class Name { fields; methods }` desugars to a Coco struct + inherent impl
+# (the language's Rust/Go composition model). Methods stay on the struct, so
+# `x.method()` works directly; `implements I` also publishes the class as an
+# `impl I for X` that delegates to the inherent method, so passing it to a
+# function typed as the interface dispatches correctly.
+#
+# `interface I { def m(self) -> T; }` is a Go-style structural bound (trait).
+# `record Name(f: T, ...)` is an immutable field tuple (value type).
+# `fn` is an alias for `def`.
+
+interface Named {
+    def name(self) -> string;
+}
+
+interface Loud {
+    def volume(self) -> int;
+}
+
+class Animal {
+    var name: string = "unnamed";
+    def speak(self) -> string { return "?"; }
+}
+
+class Dog implements Named, Loud {
+    var name: string = "unnamed";
+    var loud: int = 10;
+    def speak(self) -> string { return "woof"; }
+    def name(self) -> string { return self.name; }
+    def volume(self) -> int { return self.loud; }
+}
+
+# `extends` = single inheritance. Derived inherits the base's fields and
+# non-overridden methods; redefining a name overrides it virtually, so calling
+# through a reference typed as the base still dispatches to the derived version.
+class Base {
+    var id: int = 1;
+    def greet(self) -> string { return "base(" + str(self.id) + ")"; }
+    def tag(self) -> string   { return "Base"; }
+}
+
+class Derived extends Base {
+    var id: int = 2;                 # overrides Base.id (shadowing)
+    def tag(self) -> string { return "Derived"; }   # virtual override
+    def describe(self) -> string { return self.greet() + "/" + self.tag(); }
+}
+
+def render_base_tag(b: Base) -> string { return b.tag(); }
+
+record Point(fx: int, fy: int) { }
+
+fn add(a: int, b: int) -> int { return a + b; }   # fn == def
+
+def render_name(n: Named)          { print("  render_name -> " + n.name()); }
+def get_volume(l: Loud) -> int     { return l.volume(); }
+
+def main() {
+    d = Dog(name: "Rex", loud: 8);
+    print("direct speak  = " + d.speak());       # inherent method
+    print("direct name   = " + d.name());
+    render_name(d);                              # via interface Named
+    print("volume        = " + str(get_volume(d)));  # via interface Loud
+
+    a = Animal();
+    print("animal speak  = " + a.speak());
+
+    # inheritance: field + method override, virtual dispatch through base type
+    b = Base();
+    dv = Derived();
+    print("base   greet  = " + b.greet());
+    print("base   describe = " + b.greet() + "/" + b.tag());
+    print("deriv  greet  = " + dv.greet());       # inherited Base.greet; id=2
+    print("deriv  describe = " + dv.describe());  # own greet+tag; id=2
+    print("deriv  tag    = " + render_base_tag(dv)); # virtual -> "Derived"
+
+    p = Point(fx: 3, fy: 4);
+    print("point         = (" + str(p.fx) + ", " + str(p.fy) + ")");
+    # records are value types: ==/-structural equality on fields
+    print("rec eq        = " + str(p == Point(fx: 3, fy: 4)) +
+          " " + str(p == Point(fx: 9, fy: 9)));
+
+    print("fn-add        = " + str(add(2, 3)));
+}

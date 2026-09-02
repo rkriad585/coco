@@ -1,0 +1,9 @@
+# expect: non-exhaustive match over enum 'Color': missing 'Green'
+# 5.4 - enum match must cover every variant.
+enum Color { Red, Green, Blue }
+def describe(c: Color) -> string {
+    match c {
+        case Red { return "red"; }
+        case Blue { return "blue"; }
+    }
+}

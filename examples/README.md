@@ -40,5 +40,13 @@ documented expected output.
 | 30 | capstone_wordcount | concurrent word-count combining all of the above |
 | 31 | advanced_patterns | ranges, guards, `@` aliases, disjoint or-patterns |
 | 32 | conventions | `main.co` entry + `pin.co` package initializer (run-once) |
+| 34 | batteries | stdlib breadth: json/string/table/list utilities |
+| 35 | try_catch | `try { } catch e { }` statement + existing `try expr` propagation |
+| 36 | oop | `class`/`interface`/`record`/`fn`; `extends` single inheritance + virtual dispatch; record structural `==` |
+| 37 | dynamic_any | `any` / `dynamic` alias: dynamic typing + duck-typed method calls |
+| 38 | patterns_power | slice `[a, b, ..rest]`, pure `..`, tuple-rest `(x, y, ..)`, nested `@`, ref `&pat` (now via `match`-as-expression) |
+| 39 | builtin_methods | builtin method forms: `len`, `repeat`, `contains`, `starts_with`, `ends_with`, `replace`, `find`, `capitalize`, `extend`, `reverse`, `clear`, `setdefault`, set/dict `remove`/`contains` |
+| 40 | keywords | `None` type, `del` (vars/dict/list/struct-field), `pr`, `local`/`global`, `temp` use-budget, `bucket` park/release |
+| 41 | generators | `yield` statement + generator functions: `def f() -> gen[T]`, iteration, `filter`/`map`/`collect`/`len` on `gen` |
 
 **Rule:** any grammar change must be validated against this corpus before merge.

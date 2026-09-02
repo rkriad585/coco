@@ -17,6 +17,67 @@ bool isCmpTok(std::string_view s) {
            s == "!=" || s == "is" || s == "in";
 }
 
+// ---- helpers for class/interface/record desugaring ------------------------
+
+// Deep-clone a type AST (Type has unique_ptr members; no default copy).
+ast::TypeP cloneType(const ast::Type* t) {
+    if (!t) return nullptr;
+    auto c = std::make_unique<ast::Type>();
+    c->kind = t->kind;
+    c->span = t->span;
+    c->name = t->name;
+    c->refMut = t->refMut;
+    if (t->inner) c->inner = cloneType(t->inner.get());
+    for (const auto& g : t->generics) c->generics.push_back(cloneType(g.get()));
+    for (const auto& p : t->params) c->params.push_back(cloneType(p.get()));
+    if (t->ret) c->ret = cloneType(t->ret.get());
+    return c;
+}
+
+// Deep-clone a parameter (Param has TypeP/ExprP members, so no default copy).
+ast::Param cloneParam(const ast::Param& p) {
+    ast::Param c;
+    c.name = p.name;
+    c.mutable_ = p.mutable_;
+    c.variadic = p.variadic;
+    c.selfParam = p.selfParam;
+    c.span = p.span;
+    c.type = p.type ? cloneType(p.type.get()) : nullptr;
+    // defaultValue is only used for call defaults on user funcs; the impl
+    // delegate carries no defaults, so dropping it is safe.
+    c.defaultValue = nullptr;
+    return c;
+}
+
+// Build `ExprStmt { self.<name>(p1, p2, ...) }` used as the body of a generated
+// `impl Interface for Class` method that delegates to the inherent method.
+ast::StmtP makeDelegateBody(const std::string& name,
+                            const std::vector<ast::Param>& params) {
+    auto call = std::make_unique<ast::Expr>();
+    call->kind = ast::ExKind::Call;
+    auto member = std::make_unique<ast::Expr>();
+    member->kind = ast::ExKind::Member;
+    auto recv = std::make_unique<ast::Expr>();
+    recv->kind = ast::ExKind::Ident;
+    recv->text = "self";
+    member->lhs = std::move(recv);
+    member->text = name;
+    call->lhs = std::move(member);
+    for (const auto& p : params) {
+        if (p.selfParam || p.name == "self") continue;
+        auto argExpr = std::make_unique<ast::Expr>();
+        argExpr->kind = ast::ExKind::Ident;
+        argExpr->text = p.name;
+        ast::CallArg arg;
+        arg.value = std::move(argExpr);
+        call->args.push_back(std::move(arg));
+    }
+    auto st = std::make_unique<ast::Stmt>();
+    st->kind = ast::StKind::ExprStmt;
+    st->exprs.push_back(std::move(call));
+    return st;
+}
+
 } // namespace
 
 // ---------------------------------------------------------------------------
@@ -124,12 +185,39 @@ std::vector<ast::StmtP> Parser::parseProgram() {
         try {
             auto s = parseTopOrStmt();
             if (s) out.push_back(std::move(s));
+            for (auto& ex : extraTopStmts_) out.push_back(std::move(ex));
+            extraTopStmts_.clear();
         } catch (Abort&) {
+            extraTopStmts_.clear();
             syncToStatementEnd();
         }
         skipNewlines();
     }
     return out;
+}
+
+// Disambiguate `name : Type = value` (annotated immutable binding) from
+// `name : <stmt>` (jump label). At bracket depth 0, scanning from the token
+// after the colon, we look for a top-level `=` reached via type-ish tokens
+// before any statement terminator (`;`, `{`, `}`, or an out-of-block token).
+bool Parser::looksLikeTypedBinding() const {
+    size_t depth = 0;
+    for (size_t off = 2;; ++off) {
+        const Token& t = cur(off);
+        if (t.kind == Tok::Eof || t.kind == Tok::Newline ||
+            t.kind == Tok::Dedent)
+            return false;                      // no `=` reached → a label
+        if (t.kind == Tok::Punct) {
+            if (t.text == ";" || t.text == "{" || t.text == "}")
+                return false;                  // statement/block boundary
+            if (t.text == "[") { ++depth; continue; }
+            if (t.text == "]") { if (depth) --depth; continue; }
+            continue;
+        }
+        if (t.kind == Tok::Op && depth == 0 && t.text == "=") return true;
+        if (t.kind == Tok::Op && depth == 0)
+            return false;                      // e.g. `name : x += 1` → statement
+    }
 }
 
 ast::StmtP Parser::parseTopOrStmt() {
@@ -142,17 +230,58 @@ ast::StmtP Parser::parseTopOrStmt() {
         s->label = lbl;
         return s;
     }
+    // jump label:  label: <stmt>   (goto target; a label is a marker whose
+    // body is the labeled statement)
+    //
+    // Disambiguation: `name : Type = value` is an annotated immutable binding
+    // (see parseSimpleStmt). A jump label is `name : <stmt>`. Both start with
+    // an identifier and a colon. Rule: if after the colon we find a type-ish
+    // sequence that is terminated by `=` at the top level (before any statement
+    // terminator), it is a typed declaration, not a label.
+    if (cur().kind == Tok::Ident && atPunct(":", 1) &&
+        !looksLikeTypedBinding()) {
+        auto s = std::make_unique<ast::Stmt>();
+        s->kind = ast::StKind::Label;
+        s->label = advance().text;
+        s->span = spanHere();
+        advance();                                      // ':'
+        s->body.push_back(parseTopOrStmt());
+        return s;
+    }
     if (atIdent("def")) return parseFuncDef(false);
+    if (atIdent("fn")) return parseFuncDef(false);          // `fn` == `def`
 
+    if (atIdent("pr")) {
+        advance();
+        if (atIdent("def") || atIdent("fn")) {
+            auto s = parseFuncDef(false);
+            s->privateDecl = true;
+            return s;
+        }
+        if (atIdent("struct")) { auto s = parseStructDef(); s->privateDecl = true; return s; }
+        if (atIdent("class"))  { auto s = parseClassDef(false); s->privateDecl = true; return s; }
+        if (atIdent("interface")) { auto s = parseInterfaceDef(false); s->privateDecl = true; return s; }
+        if (atIdent("record")) { auto s = parseRecordDef(false); s->privateDecl = true; return s; }
+        if (atIdent("enum"))   { auto s = parseEnumDef(); s->privateDecl = true; return s; }
+        if (atIdent("trait"))  { auto s = parseTraitDef(); s->privateDecl = true; return s; }
+        if (atIdent("const"))  { advance(); auto s = finishConstDecl(); s->privateDecl = true; return s; }
+        diags_.report(cur().line, cur().col,
+                      "'pr' must precede def/fn/struct/class/interface/record/enum/trait/const");
+        throw Abort("pr");
+    }
     if (atIdent("pub")) {
         advance();
         if (atIdent("def")) return parseFuncDef(true);
+        if (atIdent("fn")) return parseFuncDef(true);       // `pub fn` == `pub def`
         if (atIdent("struct")) { auto s = parseStructDef(); s->pub = true; return s; }
+        if (atIdent("class"))  return parseClassDef(true);
+        if (atIdent("interface")) return parseInterfaceDef(true);
+        if (atIdent("record")) return parseRecordDef(true);
         if (atIdent("enum"))   { auto s = parseEnumDef();   s->pub = true; return s; }
         if (atIdent("trait"))  { auto s = parseTraitDef();  s->pub = true; return s; }
         if (atIdent("const"))  { advance(); auto s = finishConstDecl(); s->pub = true; return s; }
         diags_.report(cur().line, cur().col,
-                      "'pub' must precede def/struct/enum/trait/const");
+                      "'pub' must precede def/fn/struct/class/interface/record/enum/trait/const");
         throw Abort("pub");
     }
     if (atIdent("extern") && atIdent("def", 1)) {
@@ -163,15 +292,32 @@ ast::StmtP Parser::parseTopOrStmt() {
         return s;
     }
     if (atIdent("struct")) return parseStructDef();
+    if (atIdent("class")) return parseClassDef(false);
+    if (atIdent("interface")) return parseInterfaceDef(false);
+    if (atIdent("record")) return parseRecordDef(false);
     if (atIdent("enum")) return parseEnumDef();
     if (atIdent("trait")) return parseTraitDef();
     if (atIdent("impl")) return parseImplDef();
     if (atIdent("import") || atIdent("from")) return parseImport(atIdent("from"), false);
     if (atIdent("export")) return parseImport(false, true);
     if (atIdent("const")) { advance(); return finishConstDecl(); }
-    if (atIdent("if") || atIdent("while") || atIdent("for") || atIdent("match") ||
-        atIdent("select") || atIdent("unsafe"))
+    if (atIdent("try") && atPunct("{", 1)) return parseCompound();
+    if (atIdent("if") || atIdent("while") || atIdent("for") ||
+        atIdent("match") || atIdent("select") || atIdent("unsafe") ||
+        (atIdent("do") && atPunct("{", 1)) ||
+        (atIdent("gather") && atPunct("{", 1)))
         return parseCompound();
+    if (atIdent("gather")) {
+        // `gather <expr>,` — append an item to the enclosing worklist.
+        // Terminated by ',' (not ';'), so handled here (parseSimple adds ';').
+        advance();
+        auto s = std::make_unique<ast::Stmt>();
+        s->kind = ast::StKind::GatherStmt;
+        s->span = spanHere();
+        s->exprs.push_back(parseExpr());
+        expectPunct(",");
+        return s;
+    }
     return parseSimple();
 }
 
@@ -179,14 +325,16 @@ ast::StmtP Parser::parseTopOrStmt() {
 // declarations
 // ---------------------------------------------------------------------------
 
-std::vector<std::pair<std::string, ast::TypeP>> Parser::parseTypeParams() {
-    std::vector<std::pair<std::string, ast::TypeP>> out;
+std::vector<ast::TypeParam> Parser::parseTypeParams() {
+    std::vector<ast::TypeParam> out;
     expectPunct("[");
     while (!atPunct("]")) {
         auto nameTok = expect(Tok::Ident, "type parameter name");
-        ast::TypeP bound;
-        if (atIdent("is")) { advance(); bound = parseType(); }
-        out.emplace_back(nameTok.text, std::move(bound));
+        ast::TypeParam tp;
+        tp.name = nameTok.text;
+        if (atIdent("is")) { advance(); tp.bound = parseType(); }
+        if (atOp("=")) { advance(); tp.def = parseType(); }
+        out.push_back(std::move(tp));
         if (atPunct(",")) advance();
         else break;
     }
@@ -297,11 +445,186 @@ ast::StmtP Parser::parseStructDef() {
     return s;
 }
 
+// `class Name { fields; methods }`  (== Rust-style struct + inherent impl)
+//   desugars to a StructDef whose fields stay in `struct` and whose methods are
+//   relocated into `impl` nodes. The runtime's method resolution falls back to
+//   trait impls (runtime.cpp invokeMethod), so both `x.method()` and
+//   interface-object dispatch resolve the same methods. This is semantics-
+//   preserving and needs no new VM/runtime support.
+//
+//   class Name implements IfaceA, IfaceB { ... }   -> struct Name + impl IfaceA +
+//                                                     impl IfaceB (methods shared).
+//   `extends` (single inheritance / virtual dispatch) is reserved (Phase-2 tail):
+//   reported here so the syntax is rejected loudly rather than silently ignored.
+ast::StmtP Parser::parseClassDef(bool pub) {
+    auto s = std::make_unique<ast::Stmt>();
+    s->kind = ast::StKind::StructDef;                  // facade over a struct
+    s->pub = pub;
+    s->span = spanHere();
+    advance();                                          // class | pub class
+    s->name = expect(Tok::Ident, "class name").text;
+    if (atPunct("[")) s->typeParams = parseTypeParams();
+
+    // Base class (single inheritance). Only one base allowed; additional bases
+    // are reported as a clear error. Chainable: `class A extends B extends C`.
+    if (atIdent("extends")) {
+        advance();
+        s->baseName = expect(Tok::Ident, "base class name").text;
+        if (atIdent("extends")) {
+            diags_.report(cur().line, cur().col,
+                          s->baseName +
+                              " already extends a base; Coco supports single "
+                              "inheritance (one base) plus structural "
+                              "'implements' interfaces");
+            throw Abort("extendsmulti");
+        }
+    }
+
+    std::vector<std::string> ifaces;
+    if (atIdent("implements")) {
+        advance();
+        for (;;) {
+            auto nm = expect(Tok::Ident, "interface name").text;
+            ifaces.push_back(nm);
+            if (atPunct(",")) { advance(); continue; }
+            break;
+        }
+    }
+
+    expectPunct("{");
+    std::vector<ast::StmtP> methods;
+    for (;;) {
+        if (atPunct("}")) { advance(); break; }
+        if (at(Tok::Eof)) {
+            diags_.report(cur().line, cur().col,
+                          "unexpected end of file inside class body");
+            throw Abort("classeof");
+        }
+        if (atIdent("def") || atIdent("fn")) {
+            methods.push_back(parseFuncDef(false));
+            continue;
+        }
+        ast::FieldDecl f;
+        f.span = spanHere();
+        if (atIdent("weak")) { advance(); f.weak = true; }
+        if (atIdent("var") && cur(1).kind == Tok::Ident && !isKeyword(cur(1).text)) {
+            advance();
+            f.mutable_ = true;
+        }
+        if (atIdent("pub")) { advance(); f.pub = true; }
+        f.name = expect(Tok::Ident, "field name").text;
+        expectPunct(":");
+        f.type = parseType();
+        if (atOp("=")) { advance(); f.defaultValue = parseExpr(); }
+        expectPunct(";");                               // fields end with ';'
+        s->fields.push_back(std::move(f));
+    }
+    // Methods stay inherent (direct `x.method()` finds them first at runtime).
+    s->body = std::move(methods);
+    // `class X implements I` also publishes each interface conformance as an
+    // `impl I for X` whose methods delegate to the inherent method via `self`
+    // (the runtime resolves `self.method` to the inherent one, so no recursion).
+    for (const auto& iface : ifaces) {
+        auto im = std::make_unique<ast::Stmt>();
+        im->kind = ast::StKind::ImplDef;
+        im->span = s->span;
+        im->implTrait = ast::Type::makeName(iface, s->span);
+        im->implType = ast::Type::makeName(s->name, s->span);
+        for (const auto& m : s->body) {
+            if (m->kind != ast::StKind::FuncDef) continue;
+            auto del = std::make_unique<ast::Stmt>();
+            del->kind = ast::StKind::FuncDef;
+            del->name = m->name;
+            for (const auto& p : m->params) del->params.push_back(cloneParam(p));
+            del->ret = m->ret ? cloneType(m->ret.get()) : nullptr;
+            del->body.push_back(makeDelegateBody(m->name, del->params));
+            im->body.push_back(std::move(del));
+        }
+        extraTopStmts_.push_back(std::move(im));
+    }
+    return s;
+}
+
+// `interface Name { method(s): sig; }`  (Go-style structural bound)
+//   desugars to a TraitDef with signature-only methods.
+ast::StmtP Parser::parseInterfaceDef(bool pub) {
+    auto s = std::make_unique<ast::Stmt>();
+    s->kind = ast::StKind::TraitDef;
+    s->pub = pub;
+    s->span = spanHere();
+    advance();                                          // interface
+    s->name = expect(Tok::Ident, "interface name").text;
+    if (atPunct("[")) s->typeParams = parseTypeParams();
+    expectPunct("{");
+    for (;;) {
+        if (atPunct("}")) { advance(); break; }
+        if (at(Tok::Eof)) {
+            diags_.report(cur().line, cur().col,
+                          "unexpected end of file inside interface body");
+            throw Abort("ifaceeof");
+        }
+        if (atIdent("def") || atIdent("fn")) {
+            // signature-only (no body): consume `def`, name, params, ret, ';'
+            advance();
+            auto nameTok = expect(Tok::Ident, "method name");
+            auto params = parseParamList();
+            ast::TypeP ret;
+            if (atOp("->")) { advance(); ret = parseType(); }
+            ast::TraitMethodSig sig;
+            sig.name = nameTok.text;
+            sig.params = std::move(params);
+            sig.ret = std::move(ret);
+            sig.span = spanOf(nameTok);
+            s->sigs.push_back(std::move(sig));
+            expectPunct(";");
+            continue;
+        }
+        diags_.report(cur().line, cur().col,
+                      "expected a method signature in interface body");
+        throw Abort("ifacesig");
+    }
+    return s;
+}
+
+// `record Name(f: T, g: U = d) { }`  (immutable value type)
+//   Desugars to a StructDef of fields; equality/repr use the value semantics that
+//   the runtime already provides for structs (Phase-2 tail adds a full structural
+//   `==`/sort order, mirroring `record` in C#/Java).
+ast::StmtP Parser::parseRecordDef(bool pub) {
+    auto s = std::make_unique<ast::Stmt>();
+    s->kind = ast::StKind::StructDef;
+    s->pub = pub;
+    s->span = spanHere();
+    advance();                                          // record'
+    s->name = expect(Tok::Ident, "record name").text;
+    if (atPunct("[")) s->typeParams = parseTypeParams();
+    expectPunct("(");
+    while (!atPunct(")")) {
+        ast::FieldDecl f;
+        f.span = spanHere();
+        if (atIdent("var") && cur(1).kind == Tok::Ident && !isKeyword(cur(1).text)) {
+            advance();
+            f.mutable_ = true;
+        }
+        f.name = expect(Tok::Ident, "field name").text;
+        expectPunct(":");
+        f.type = parseType();
+        if (atOp("=")) { advance(); f.defaultValue = parseExpr(); }
+        s->fields.push_back(std::move(f));
+        if (atPunct(",")) { advance(); continue; }
+        break;
+    }
+    expectPunct(")");
+    if (atPunct("{")) { parseBlock(); endBlock(); }     // optional empty body
+    return s;
+}
+
 std::vector<ast::Variant> Parser::parseVariants() {
     std::vector<ast::Variant> out;
     for (;;) {
         if (atPunct("}") || at(Tok::Eof)) break;
         if (atPunct(",")) { advance(); continue; }      // trailing comma
+        if (atPunct(";")) { advance(); continue; }      // semicolon separator
         ast::Variant v;
         v.span = spanHere();
         v.name = expect(Tok::Ident, "variant name").text;
@@ -500,7 +823,10 @@ std::vector<ast::StmtP> Parser::parseBlock() {
         }
         try {
             body.push_back(parseTopOrStmt());
+            for (auto& ex : extraTopStmts_) body.push_back(std::move(ex));
+            extraTopStmts_.clear();
         } catch (Abort&) {
+            extraTopStmts_.clear();
             syncToStatementEnd();
         }
     }
@@ -551,6 +877,50 @@ ast::StmtP Parser::parseCompound() {
         return s;
     }
 
+    if (atIdent("do")) {
+        // do { body } while cond ;        -> DoWhile (runs body once, then
+        // do { body } while pat = expr ;  -> tests cond; with a binding
+        //    pattern, cond's value binds each round)
+        advance();
+        s->kind = ast::StKind::DoWhile;
+        s->body = parseBlock();            // parseBlock consumes '{' itself
+        endBlock();
+        if (!atIdent("while")) {
+            diags_.report(s->span.line, s->span.col,
+                          "expected 'while' after 'do { ... }'");
+            throw Abort("dowhile");
+        }
+        advance();                          // 'while'
+        if (cur().kind == Tok::Ident && atOp("=", 1) &&
+            !isKeyword(cur().text)) {
+            // search-loop form:  while pat = expr
+            auto p = parsePattern();
+            advance();                      // '='
+            s->pat = std::move(p);
+        }
+        s->cond = parseExpr();
+        if (atPunct(";")) advance();        // optional trailing ';' (C-style)
+        return s;
+    }
+
+    if (atIdent("gather")) {
+        advance();
+        // gather { seeds }  body   — worklist loop
+        if (atPunct("{")) {
+            advance();                                  // seed block '{'
+            s->kind = ast::StKind::Gather;
+            while (!atPunct("}")) {
+                if (atPunct(",")) { advance(); continue; }
+                s->seedExprs.push_back(parseExpr());
+                if (atPunct(",")) advance();
+            }
+            advance();                                  // seed block '}'
+            s->body = parseBlock();
+            endBlock();
+            return s;
+        }
+    }
+
     if (atIdent("for")) {
         advance();
         s->kind = ast::StKind::For;
@@ -574,7 +944,7 @@ ast::StmtP Parser::parseCompound() {
         for (;;) {
             if (atPunct("}") || at(Tok::Eof)) break;    // '}' via endBlock below
             expect(Tok::Ident, "'case'");               // consumes 'case'
-            ast::Stmt::Arm arm;
+            ast::MatchArm arm;
             arm.pat = parsePattern();
             if (atIdent("if")) { advance(); arm.guard = parseExpr(); }
             arm.body = parseBlock();
@@ -619,6 +989,25 @@ ast::StmtP Parser::parseCompound() {
         return s;
     }
 
+    if (atIdent("try") && atPunct("{", 1)) {
+        advance();                                        // 'try'
+        s->kind = ast::StKind::Try;
+        s->body = parseBlock();
+        endBlock();
+        if (atIdent("catch")) {
+            advance();                                    // 'catch'
+            if (cur().kind == Tok::Ident && !isKeyword(cur().text) &&
+                atPunct("{", 1)) {
+                s->catchParam = advance().text;
+            }
+            s->elseBody = parseBlock();
+            endBlock();
+        } else {
+            s->elseBody.clear();   // a `try` with no `catch` re-throws (no-op)
+        }
+        return s;
+    }
+
     diags_.report(s->span.line, s->span.col, "internal: unknown compound statement");
     throw Abort("compound");
 }
@@ -640,6 +1029,73 @@ ast::StmtP Parser::parseSimpleStmt() {
     if (cur().kind == Tok::Ident) {
         const std::string& w = cur().text;
         if (w == "pass")    { advance(); s->kind = ast::StKind::Pass; return s; }
+        if (w == "del") {
+            advance();
+            s->kind = ast::StKind::Del;
+            s->exprs.push_back(parseExpr());
+            return s;
+        }
+        if (w == "local" && cur(1).kind == Tok::Ident && !isKeyword(cur(1).text)) {
+            advance();
+            s->kind = ast::StKind::LocalDecl;
+            s->target = parseExpr();
+            if (atPunct(":")) { advance(); s->declType = parseType(); }
+            if (atOp("=")) { advance(); s->value = parseExpr(); }
+            return s;
+        }
+        if (w == "global" && cur(1).kind == Tok::Ident && !isKeyword(cur(1).text)) {
+            advance();
+            s->kind = ast::StKind::GlobalDecl;
+            s->target = parseExpr();
+            if (atPunct(":")) { advance(); s->declType = parseType(); }
+            if (atOp("=")) { advance(); s->value = parseExpr(); }
+            return s;
+        }
+        if (w == "temp" && cur(1).kind == Tok::Ident && !isKeyword(cur(1).text)) {
+            advance();
+            s->kind = ast::StKind::TempDecl;
+            s->tempVarName = advance().text;            // name
+            if (cur().kind != Tok::Int)
+                diags_.report(cur().line, cur().col,
+                              "expected usage limit after 'temp <name>'");
+            else
+                s->tempBudget = std::stoi(advance().text);
+            if (atPunct(":")) { advance(); s->declType = parseType(); }
+            if (atOp("=")) { advance(); s->value = parseExpr(); }
+            else diags_.report(cur().line, cur().col, "expected '=' in 'temp' declaration");
+            return s;
+        }
+        if (w == "bucket") {
+            advance();
+            s->kind = ast::StKind::BucketDecl;
+            if (atIdent("release")) {
+                advance();
+                s->bucketRelease = true;
+            }
+            if (cur().kind == Tok::Ident && !isKeyword(cur().text))
+                s->tempVarName = advance().text;
+            else
+                diags_.report(cur().line, cur().col,
+                              "expected variable name after 'bucket'");
+            if (atOp("=")) { advance(); s->value = parseExpr(); }
+            return s;
+        }
+        if (w == "yield") {
+            advance();
+            s->kind = ast::StKind::Yield;
+            if (!atPunct(";")) s->exprs.push_back(parseExpr());
+            return s;
+        }
+        if (w == "goto") {
+            advance();
+            s->kind = ast::StKind::Goto;
+            if (cur().kind != Tok::Ident)
+                diags_.report(cur().line, cur().col,
+                              "expected label name after 'goto'");
+            else
+                s->label = advance().text;
+            return s;
+        }
         if (w == "return") {
             advance();
             s->kind = ast::StKind::Return;
@@ -793,15 +1249,25 @@ ast::PatP Parser::parseCtorOrBind() {
         return mkPat(ast::PatKind::Wild, sp);
     }
 
+    // ref pattern: `&pat` dereferences the subject before matching `pat`.
+    // Transparent in the v1 value model (subject is matched in place).
+    if (atOp("&")) {
+        advance();
+        auto r = mkPat(ast::PatKind::Ref, sp);
+        r->inner = parsePattern();
+        return r;
+    }
+
     // slice / list pattern:  [p1, p2, ..rest]  |  [p1, p2]
     if (atPunct("[")) {
         advance();
         auto sl = mkPat(ast::PatKind::Slice, sp);
         while (!atPunct("]")) {
             if (atPunct(",")) { advance(); continue; }
-            // rest: `..` [name]
+// rest: `..` [name]
             if (atOp("..")) {
                 advance();
+                sl->hasRest = true;                       // even unnamed `..`
                 if (cur().kind == Tok::Ident && cur().text != "_")
                     sl->restName = advance().text;
                 break;                                  // rest captures tail
@@ -825,6 +1291,7 @@ ast::PatP Parser::parseCtorOrBind() {
         if (atOp("..")) {
             advance();
             auto tup = mkPat(ast::PatKind::Tuple, sp);
+            tup->hasRest = true;
             if (cur().kind == Tok::Ident && cur().text != "_")
                 tup->restName = advance().text;
             if (!atPunct(")")) {
@@ -848,6 +1315,7 @@ ast::PatP Parser::parseCtorOrBind() {
                 if (atPunct(")")) break;
                 if (atOp("..")) {                       // rest in tuple
                     advance();
+                    tup->hasRest = true;
                     if (cur().kind == Tok::Ident && cur().text != "_")
                         tup->restName = advance().text;
                     break;
@@ -866,7 +1334,8 @@ ast::PatP Parser::parseCtorOrBind() {
     if (minus || cur().kind == Tok::Int || cur().kind == Tok::Float ||
         cur().kind == Tok::Char || cur().kind == Tok::StrNormal ||
         cur().kind == Tok::StrRaw || ((cur().kind == Tok::Ident) &&
-            (cur().text == "true" || cur().text == "false" || cur().text == "none"))) {
+            (cur().text == "true" || cur().text == "false" ||
+             cur().text == "none" || cur().text == "nil"))) {
         auto lit = std::make_unique<ast::Expr>();
         if (minus) {
             advance();
@@ -1070,6 +1539,28 @@ bool Parser::tryParseLambda(ast::ExprP& out) {
     return true;
 }
 
+// `fn (params) [-> ret] { body }` — a block-bodied closure. Distinct from a
+// function declaration (`fn name(...)`) by the `(` immediately after `fn`.
+ast::ExprP Parser::parseFnClosure() {
+    auto lam = std::make_unique<ast::Expr>();
+    lam->kind = ast::ExKind::Lambda;
+    lam->span = spanHere();
+    advance();                                      // 'fn'
+    lam->closureParams = parseParamList();
+    if (atOp("->")) {
+        advance();
+        lam->retType = parseType();
+    }
+    if (!atPunct("{")) {
+        diags_.report(cur().line, cur().col,
+                      "expected '{' to start the fn closure body");
+        throw Abort("fnclosure");
+    }
+    lam->lambdaBody = parseBlock();
+    endBlock();
+    return lam;
+}
+
 ast::ExprP Parser::parseExpr() {
     ast::Span sp = spanHere();
     if (atIdent("spawn")) {                             // spawn as expression
@@ -1125,6 +1616,8 @@ ast::ExprP Parser::parseExpr() {
         return g;
     }
     if (atIdent("if")) return parseCondExpr();
+
+    if (atIdent("fn") && atPunct("(", 1)) return parseFnClosure();
 
     ast::ExprP lam;
     if (tryParseLambda(lam)) return lam;
@@ -1451,6 +1944,29 @@ ast::ExprP Parser::parsePostfix() {
 ast::ExprP Parser::parsePrimary() {
     ast::Span sp = spanHere();
     const Token& t = cur();
+
+    // match-expression: `match <subj> { case pat [if g] { body } ... }` yields
+    // the trailing expression of the chosen arm's body (else none).
+    if (t.kind == Tok::Ident && t.text == "match") {
+        advance();
+        auto e = std::make_unique<ast::Expr>();
+        e->kind = ast::ExKind::Match;
+        e->span = sp;
+        e->lhs = parseExpr();                           // subject
+        expectPunct("{");
+        for (;;) {
+            if (atPunct("}") || at(Tok::Eof)) break;
+            expect(Tok::Ident, "'case'");
+            ast::MatchArm arm;
+            arm.pat = parsePattern();
+            if (atIdent("if")) { advance(); arm.guard = parseExpr(); }
+            arm.body = parseBlock();
+            endBlock();
+            e->matchArms.push_back(std::move(arm));
+        }
+        expectPunct("}");
+        return e;
+    }
 
     switch (t.kind) {
         case Tok::Int:

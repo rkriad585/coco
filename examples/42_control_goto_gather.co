@@ -1,0 +1,74 @@
+# 42 — Control completeness: do-while, search do-while, safe goto,
+#      gather worklist loops, plus nil/NaN/inf constants.
+#
+# do-while          : run body at least once, test at the end
+# search do-while   : do { ... } while (pat = expr) binds each round
+# goto label        : block-local forward/backward jumps (out of loops ok)
+# gather { seeds }  : worklist loop; body re-queues with `gather expr,`
+# nil               : alias for `none`
+# NaN / inf         : IEEE-754 float constants
+#
+# Expected output:
+#   doTotal=15
+#   searchSum=10
+#   gotoTotal=10
+#   gatherVisited=[0, 1, 2, 3, 4]
+#   gatherBfs=[1, 2, 4, 8, 16]
+#   nilv=none
+#   nan=|NaN|
+#   inf=inf
+
+def main() {
+    # --- do-while ---------------------------------------------------------
+    n = 5;
+    total = 0;
+    do { total += n; n -= 1; } while n > 0;
+    print("doTotal=" + str(total));
+    # single-shot: body runs once even when the condition is false at entry
+    z = 0;
+    do { z = 1; } while false;
+    print("doOnce=" + str(z));
+
+    # --- search do-while (pattern binds the condition value each round) ----
+    xs = [1, 2, 3, 4, 0];
+    i = 0;
+    sum = 0;
+    x = xs[0];
+    do {
+        sum += x;
+        i += 1;
+    } while x = xs[i];
+    print("searchSum=" + str(sum));
+
+    # --- safe goto: jump out of a loop to a function-level label ----------
+    total2 = 0;
+    for k in 0..1000 {
+        if k == 5 { goto done; }
+        total2 += k;
+    }
+done:
+    print("gotoTotal=" + str(total2));
+
+    # gather worklist: reach a fixed point by re-queueing
+    visited = [];
+    gather { 0 } {
+        if len(visited) >= 5 { break; }
+        visited.append(item);
+        gather item + 1,
+    }
+    print("gatherVisited=" + str(visited));
+
+    # gather worklist: BFS-ish doubling until the budget is reached (bounded)
+    out = [];
+    gather { 1 } {
+        out.append(item);
+        if item < 16 { gather item * 2, }
+    }
+    print("gatherBfs=" + str(out));
+
+    # --- nil / NaN / inf ---------------------------------------------------
+    v = nil;
+    print("nilv=" + str(v));
+    print("nan=|" + str(NaN) + "|");
+    print("inf=" + str(inf));
+}

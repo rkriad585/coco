@@ -122,6 +122,7 @@ const char* exName(ExKind k) {
         case ExKind::Tuple:     return "Tuple";
         case ExKind::New:      return "New";
         case ExKind::Cast:     return "Cast";
+        case ExKind::Match:    return "Match";
     }
     return "?";
 }
@@ -208,6 +209,16 @@ void dumpExpr(const Expr& e, int d) {
             std::cout << ind(d) << "Cast as " << typeStr(e.newType) << '\n';
             childExpr("Operand", e.lhs, d + 1);
             return;
+        case ExKind::Match:
+            std::cout << ind(d) << "Match\n";
+            childExpr("Subject", e.lhs, d + 1);
+            for (const auto& arm : e.matchArms) {
+                std::cout << ind(d + 1) << "Arm\n";
+                dumpPat(*arm.pat, d + 2);
+                if (arm.guard) childExpr("Guard", arm.guard, d + 2);
+                for (const auto& st : arm.body) dump(*st, d + 2);
+            }
+            return;
         case ExKind::Index:
             std::cout << ind(d) << "Index\n";
             childExpr("Obj", e.lhs, d + 1);
@@ -232,10 +243,23 @@ void dumpExpr(const Expr& e, int d) {
             return;
         case ExKind::Lambda: {
             std::cout << ind(d) << "Lambda params=(";
-            for (size_t i = 0; i < e.lambdaParams.size(); ++i)
-                std::cout << (i ? ", " : "") << e.lambdaParams[i];
-            std::cout << ")\n";
-            childExpr("Body", e.rhs, d + 1);
+            if (!e.closureParams.empty()) {
+                for (size_t i = 0; i < e.closureParams.size(); ++i) {
+                    if (i) std::cout << ", ";
+                    std::cout << e.closureParams[i].name
+                              << ": " << typeStr(e.closureParams[i].type);
+                }
+                std::cout << ")\n";
+                if (e.retType)
+                    std::cout << ind(d + 1) << "Ret " << typeStr(e.retType) << '\n';
+                std::cout << ind(d + 1) << "Body\n";
+                for (const auto& st : e.lambdaBody) dump(*st, d + 2);
+            } else {
+                for (size_t i = 0; i < e.lambdaParams.size(); ++i)
+                    std::cout << (i ? ", " : "") << e.lambdaParams[i];
+                std::cout << ")\n";
+                childExpr("Body", e.rhs, d + 1);
+            }
             return;
         }
         case ExKind::Cond:
@@ -302,6 +326,28 @@ void dumpPat(const Pat& p, int d) {
             std::cout << ind(d) << "PatBind " << p.bindName
                       << (p.bindType ? " : " + typeStr(p.bindType) : "") << '\n';
             return;
+        case PatKind::BindAlias:
+            std::cout << ind(d) << "PatBindAlias " << p.bindName << '\n';
+            if (p.aliasSub) dumpPat(*p.aliasSub, d + 1);
+            return;
+        case PatKind::Or:
+            std::cout << ind(d) << "PatOr\n";
+            for (auto& a : p.alts) dumpPat(*a, d + 1);
+            return;
+        case PatKind::Slice:
+            std::cout << ind(d) << "PatSlice elems=" << p.elems.size()
+                      << (p.hasRest ? (p.restName.empty() ? " .."
+                                                          : " .." + p.restName)
+                                    : "") << '\n';
+            for (auto& el : p.elems) dumpPat(*el, d + 1);
+            return;
+        case PatKind::Rest:
+            std::cout << ind(d) << "PatRest\n";
+            return;
+        case PatKind::Ref:
+            std::cout << ind(d) << "PatRef\n";
+            if (p.inner) dumpPat(*p.inner, d + 1);
+            return;
     }
 }
 
@@ -319,9 +365,11 @@ void dump(const Stmt& s, int d) {
                 std::cout << " generics=[";
                 for (size_t i = 0; i < s.typeParams.size(); ++i) {
                     if (i) std::cout << ", ";
-                    std::cout << s.typeParams[i].first;
-                    if (s.typeParams[i].second)
-                        std::cout << " is " << typeStr(s.typeParams[i].second);
+                    std::cout << s.typeParams[i].name;
+                    if (s.typeParams[i].bound)
+                        std::cout << " is " << typeStr(s.typeParams[i].bound);
+                    if (s.typeParams[i].def)
+                        std::cout << " = " << typeStr(s.typeParams[i].def);
                 }
                 std::cout << ']';
             }
@@ -479,6 +527,28 @@ void dump(const Stmt& s, int d) {
             std::cout << ind(d + 1) << "Body\n";
             for (const auto& st : s.body) dump(*st, d + 2);
             return;
+        case StKind::DoWhile:
+            std::cout << ind(d) << "DoWhile\n";
+            if (s.pat) { dumpPat(*s.pat, d + 1);
+                         childExpr("Search", s.cond, d + 1); }
+            else if (s.cond) childExpr("Cond", s.cond, d + 1);
+            std::cout << ind(d + 1) << "Body\n";
+            for (const auto& st : s.body) dump(*st, d + 2);
+            return;
+        case StKind::Gather:
+            std::cout << ind(d) << "Gather\n";
+            std::cout << ind(d + 1) << "Seeds\n";
+            for (const auto& se : s.seedExprs) dumpExpr(*se, d + 2);
+            std::cout << ind(d + 1) << "Body\n";
+            for (const auto& st : s.body) dump(*st, d + 2);
+            return;
+        case StKind::GatherStmt:
+            std::cout << ind(d) << "GatherItem\n";
+            if (!s.exprs.empty()) dumpExpr(*s.exprs[0], d + 1);
+            return;
+        case StKind::Goto:
+            std::cout << ind(d) << "Goto '" << s.label << "'\n";
+            return;
         case StKind::For:
             std::cout << ind(d) << "For\n";
             if (s.pat) dumpPat(*s.pat, d + 1);
@@ -511,6 +581,14 @@ void dump(const Stmt& s, int d) {
             std::cout << ind(d) << "Unsafe\n";
             for (const auto& st : s.body) dump(*st, d + 1);
             return;
+        case StKind::Try:
+            std::cout << ind(d) << "Try\n";
+            for (const auto& st : s.body) dump(*st, d + 1);
+            std::cout << ind(d + 1) << "Catch"
+                      << (s.catchParam.empty() ? "" : " bind=" + s.catchParam)
+                      << '\n';
+            for (const auto& st : s.elseBody) dump(*st, d + 2);
+            return;
         case StKind::Import: {
             std::cout << ind(d) << (s.fromImport ? "FromImport " : "Import ")
                       << s.moduleName;
@@ -531,6 +609,42 @@ void dump(const Stmt& s, int d) {
         }
         case StKind::Export:
             std::cout << ind(d) << "Export " << s.moduleName << '\n';
+            return;
+
+        case StKind::Del:
+            std::cout << ind(d) << "Del\n";
+            if (!s.exprs.empty()) { dumpExpr(*s.exprs[0], d + 1); }
+            return;
+
+        case StKind::LocalDecl:
+            std::cout << ind(d) << "LocalDecl '" << (s.target ? s.target->text : "")
+                      << "'\n";
+            if (s.declType) std::cout << ind(d + 1) << "Type\n";
+            if (s.value) dumpExpr(*s.value, d + 1);
+            return;
+
+        case StKind::GlobalDecl:
+            std::cout << ind(d) << "GlobalDecl '" << (s.target ? s.target->text : "")
+                      << "'\n";
+            if (s.value) dumpExpr(*s.value, d + 1);
+            return;
+
+        case StKind::TempDecl:
+            std::cout << ind(d) << "TempDecl '" << s.tempVarName << "' x"
+                      << s.tempBudget << "\n";
+            if (s.declType) std::cout << ind(d + 1) << "Type\n";
+            if (s.value) dumpExpr(*s.value, d + 1);
+            return;
+
+        case StKind::BucketDecl:
+            std::cout << ind(d) << "BucketDecl '" << s.tempVarName << "' "
+                      << (s.bucketRelease ? "release" : "park") << "\n";
+            if (s.value) dumpExpr(*s.value, d + 1);
+            return;
+
+        case StKind::Yield:
+            std::cout << ind(d) << "Yield\n";
+            if (!s.exprs.empty()) dumpExpr(*s.exprs[0], d + 1);
             return;
     }
 }

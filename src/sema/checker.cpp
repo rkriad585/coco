@@ -1,5 +1,6 @@
 // Semantic analysis for Coco v1. See checker.h for the design overview.
 #include "sema/checker.h"
+#include "sema/borrow.h"
 
 namespace coco {
 namespace sema {
@@ -84,11 +85,11 @@ struct TvGuard {
     std::vector<std::string> names;
 
     TvGuard(std::map<std::string, TyP>& mm,
-            const std::vector<std::pair<std::string, ast::TypeP>>& tps)
+            const std::vector<ast::TypeParam>& tps)
         : m(mm) {
         for (const auto& tp : tps) {
-            names.push_back(tp.first);
-            m[tp.first] = Ty::named(TyK::TypeVar, tp.first);
+            names.push_back(tp.name);
+            m[tp.name] = Ty::named(TyK::TypeVar, tp.name);
         }
     }
     ~TvGuard() {
@@ -117,6 +118,77 @@ TyP nominalWithArgs(TyK k, std::string n, std::vector<TyP> args) {
 
 TyP argAt(const TyP& t, size_t i) {
     return (t && i < t->args.size()) ? t->args[i] : unkTy();
+}
+
+// Recursively replace TypeVars in a generic declaration's return type:
+// constraint/default activations win, unconstrained TypeVars without a default
+// stay as-is (inference-only). Nodes are rebuilt along the path so the shared
+// declaration signature is never mutated.
+TyP substGeneric(const TyP& t, const std::map<std::string, TyP>& activ,
+                 uint32_t line, uint32_t col) {
+    (void)line; (void)col;
+    if (!t) return t;
+    if (t->is(TyK::TypeVar)) {
+        auto it = activ.find(t->name);
+        return it != activ.end() ? it->second : t;
+    }
+    bool changed = false;
+    std::vector<TyP> args;
+    args.reserve(t->args.size());
+    for (const auto& a : t->args) {
+        TyP s = substGeneric(a, activ, 0, 0);
+        if (s != a) changed = true;
+        args.push_back(std::move(s));
+    }
+    TyP inner;
+    if (t->inner) {
+        inner = substGeneric(t->inner, activ, 0, 0);
+        if (inner != t->inner) changed = true;
+    }
+    if (!changed) return t;
+    auto out = std::shared_ptr<Ty>(new Ty());
+    out->k = t->k;
+    out->name = t->name;
+    out->variant = t->variant;
+    out->args = std::move(args);
+    out->inner = std::move(inner);
+    return out;
+}
+
+// Collect the enum variants covered by a single arm pattern (PLAN 5.4).
+void collectPatCoverage(const ast::Pat& p, std::set<std::string>& covered,
+                        bool& wild, const std::string& enumName, Scope* scope) {
+    switch (p.kind) {
+        case ast::PatKind::Wild:
+            wild = true;
+            break;
+        case ast::PatKind::Ctor: {   // `case Running(pid)`
+            if (Symbol* vs = scope->find(p.ctorName);
+                vs && vs->kind == SymK::EnumVariant && vs->enumOf == enumName)
+                covered.insert(p.ctorName);
+            break;
+        }
+        case ast::PatKind::Bind: {   // `case Idle` (discriminant match)
+            if (Symbol* vs = scope->find(p.bindName);
+                vs && vs->kind == SymK::EnumVariant && vs->enumOf == enumName)
+                covered.insert(p.bindName);
+            break;
+        }
+        case ast::PatKind::Or:
+            for (const auto& alt : p.alts)
+                collectPatCoverage(*alt, covered, wild, enumName, scope);
+            break;
+        case ast::PatKind::Ref:
+            if (p.inner)
+                collectPatCoverage(*p.inner, covered, wild, enumName, scope);
+            break;
+        case ast::PatKind::BindAlias:
+            if (p.aliasSub)
+                collectPatCoverage(*p.aliasSub, covered, wild, enumName, scope);
+            break;
+        default:
+            break;
+    }
 }
 
 bool isBoolish(const TyP& t) {
@@ -242,6 +314,7 @@ SymP Checker::declareLocal(SymK kind, const std::string& name, TyP t, bool mut,
 
 void Checker::checkModule(const std::vector<ast::StmtP>& prog) {
     push();                                    // global scope
+    rootScopeId_ = scope_->id;
     predeclareBuiltins();
     registerNominals(prog);
     fillNominals(prog);
@@ -291,6 +364,10 @@ void Checker::checkModule(const std::vector<ast::StmtP>& prog) {
     }
     reportUnused(*scope_, /*topLevel*/ true);
     pop();
+
+    // Phase 5.5: conservative borrow-escape analysis.
+    BorrowChecker borrow(diags_);
+    borrow.checkModule(prog);
 }
 
 void Checker::predeclareBuiltins() {
@@ -350,6 +427,7 @@ void Checker::predeclareBuiltins() {
     makeBuiltinFunc("float", {unkTy()}, {"x"}, floatTy(), false, 1);
     makeBuiltinFunc("bool", {unkTy()}, {"x"}, boolTy(), false, 1);
     makeBuiltinFunc("type", {unkTy()}, {"x"}, strTy(), false, 1);
+    makeBuiltinFunc("repr", {unkTy()}, {"x"}, strTy(), false, 1);
     makeBuiltinFunc("sum", {unkTy()}, {"xs"}, unkTy(), false, 1);
     makeBuiltinFunc("min", {unkTy()}, {"xs"}, unkTy(), false, 1);
     makeBuiltinFunc("max", {unkTy()}, {"xs"}, unkTy(), false, 1);
@@ -384,6 +462,9 @@ void Checker::predeclareBuiltins() {
     declareConst("true", boolTy());
     declareConst("false", boolTy());
     declareConst("none", noneTy());
+    declareConst("nil", noneTy());          // alias of `none`
+    declareConst("NaN", floatTy());
+    declareConst("inf", floatTy());
 
     // pseudo-modules used by the standard environment (dynamically typed v1).
     // Not declared into scope: user `import time` etc. must not clash; the
@@ -430,6 +511,7 @@ void Checker::registerNominals(const std::vector<ast::StmtP>& prog) {
                 sym->name = st->name;
                 sym->pub = st->pub;
                 structs_[st->name] = sym;
+                structDecls_[st->name] = st.get();
                 if (Symbol* clash = scope_->declare(sym))
                     error(st->span.line, st->span.col,
                           "duplicate definition of '" + st->name + "'");
@@ -492,6 +574,7 @@ void Checker::fillNominals(const std::vector<ast::StmtP>& prog) {
                 TvGuard tv(typeVars_, st->typeParams);
                 auto es = enums_[st->name];
                 for (const auto& v : st->variants) {
+                    if (es) es->variants.push_back(v.name);
                     auto vs = std::make_shared<Symbol>();
                     vs->kind = SymK::EnumVariant;
                     vs->name = v.name;
@@ -526,10 +609,29 @@ void Checker::fillNominals(const std::vector<ast::StmtP>& prog) {
 }
 
 void Checker::fillStructBody(SymP stSym, const ast::Stmt& s) {
+    // Single inheritance: fill the base first (recursively), then inherit its
+    // fields and non-overridden methods so subtyping/dispatch sees them.
+    if (!s.baseName.empty() && s.baseName != s.name) {
+        if (auto bd = structDecls_.find(s.baseName); bd != structDecls_.end()) {
+            if (auto bs = structs_.find(s.baseName); bs != structs_.end()) {
+                fillStructBody(bs->second, *bd->second);   // ensure base filled
+                for (const auto& bf : bs->second->fields)
+                    stSym->fields.push_back(bf);           // base fields first
+                for (const auto& bm : bs->second->methods)
+                    stSym->methods[bm.first] = bm.second;  // base methods
+            }
+        } else {
+            error(s.span, "base class '" + s.baseName + "' is not defined");
+        }
+    }
     TvGuard tv(typeVars_, s.typeParams);
+    // Derived fields override base fields of the same name (Shadowing).
     for (const auto& f : s.fields) {
         TyP ft = f.type ? resolveType(f.type) : unkTy();
-        stSym->fields.emplace_back(f.name, ft);
+        bool replaced = false;
+        for (auto& ef : stSym->fields)
+            if (ef.first == f.name) { ef.second = ft; replaced = true; break; }
+        if (!replaced) stSym->fields.emplace_back(f.name, ft);
         if (f.defaultValue) {
             push();
             TyP vt = checkExpr(*f.defaultValue);
@@ -540,8 +642,9 @@ void Checker::fillStructBody(SymP stSym, const ast::Stmt& s) {
             pop();
         }
     }
+    // Derived methods override base methods of the same name (virtual dispatch).
     for (const auto& m : s.body)
-        if (m->kind == StKind::FuncDef && !stSym->methods.count(m->name))
+        if (m->kind == StKind::FuncDef)
             stSym->methods[m->name] = resolveSig(m->params, m->ret, true);
 }
 
@@ -555,6 +658,58 @@ std::string importRootOf(const ast::Stmt& st) {
     return mod.substr(dot + 1);
 }
 
+// True when a function's own body contains a `yield` statement, descending into
+// its control flow (if/while/for/try/unsafe/match/select) but NOT into nested
+// function/type bodies — their yields belong to those nested declarations.
+static bool containsYieldStmt(const ast::Stmt& s) {
+    if (s.kind == ast::StKind::Yield) return true;
+    switch (s.kind) {
+        case ast::StKind::FuncDef:
+            // yields in the function's OWN body (recursion descends into
+            // control flow; nested FuncDefs encountered here self-terminate)
+            for (const auto& b : s.body)
+                if (containsYieldStmt(*b)) return true;
+            return false;
+        case ast::StKind::StructDef:
+        case ast::StKind::EnumDef:
+        case ast::StKind::TraitDef:
+        case ast::StKind::ImplDef:
+            return false;
+        case ast::StKind::If:
+            for (const auto& b : s.body)
+                if (containsYieldStmt(*b)) return true;
+            for (const auto& b : s.elifBodies)
+                if (containsYieldStmt(*b)) return true;
+            for (const auto& b : s.elseBody)
+                if (containsYieldStmt(*b)) return true;
+            return false;
+        case ast::StKind::While:
+        case ast::StKind::For:
+        case ast::StKind::DoWhile:
+        case ast::StKind::Gather:
+        case ast::StKind::Try:
+        case ast::StKind::Unsafe:
+            for (const auto& b : s.body)
+                if (containsYieldStmt(*b)) return true;
+            if (s.kind == ast::StKind::Try)
+                for (const auto& b : s.elseBody)
+                    if (containsYieldStmt(*b)) return true;
+            return false;
+        case ast::StKind::Match:
+            for (const auto& arm : s.arms)
+                for (const auto& b : arm.body)
+                    if (containsYieldStmt(*b)) return true;
+            return false;
+        case ast::StKind::Select:
+            for (const auto& arm : s.selArms)
+                for (const auto& b : arm.body)
+                    if (containsYieldStmt(*b)) return true;
+            return false;
+        default:
+            return false;
+    }
+}
+
 void Checker::registerTopLevel(const std::vector<ast::StmtP>& prog) {
     for (const auto& st : prog) {
         switch (st->kind) {
@@ -566,6 +721,14 @@ void Checker::registerTopLevel(const std::vector<ast::StmtP>& prog) {
                 {
                     TvGuard tv(typeVars_, st->typeParams);
                     sym->sig = resolveSig(st->params, st->ret, /*stripSelf*/ false);
+                    for (const auto& tp : st->typeParams)
+                        if (tp.def)
+                            sym->typeDefaults[tp.name] = resolveType(tp.def);
+                }
+                if (containsYieldStmt(*st)) {
+                    st->isGenerator = true;
+                    if (!st->ret)
+                        sym->sig.ret = genTy(unkTy());   // elem resolved later
                 }
                 funcs_[st->name] = sym;
                 if (Symbol* clash = scope_->declare(sym))
@@ -650,8 +813,9 @@ TyP Checker::resolveType(const ast::TypeP& t) {
             if (n == "bool")   return boolTy();
             if (n == "string") return strTy();
             if (n == "char")   return charTy();
-            if (n == "none" || n == "unit") return noneTy();
-            if (n == "int" || n == "f32")    return n == "int" ? intTy() : floatTy("f32");
+            if (n == "none" || n == "unit" || n == "None") return noneTy();
+            if (n == "int" || n == "f32" || n == "float")
+                return n == "int" ? intTy() : floatTy(n == "f32" ? "f32" : "f64");
             if (n == "f64")    return floatTy("f64");
             static const char* kIntNames[] = {"i8", "i16", "i32", "i64",
                                               "u8", "u16", "u32", "u64",
@@ -661,11 +825,12 @@ TyP Checker::resolveType(const ast::TypeP& t) {
 
             // containers
             size_t ngens = t->generics.size();
-            if (n == "list" || n == "set" || n == "chan") {
+            if (n == "list" || n == "set" || n == "chan" || n == "gen") {
                 TyP elem = ngens >= 1 ? resolveType(t->generics[0]) : unkTy();
                 if (n == "list") return listTy(elem);
                 if (n == "set")  return setTy(elem);
-                return chanTy(elem);
+                if (n == "chan") return chanTy(elem);
+                return genTy(elem);
             }
             if (n == "dict") {
                 TyP kk = ngens >= 1 ? resolveType(t->generics[0]) : unkTy();
@@ -678,6 +843,12 @@ TyP Checker::resolveType(const ast::TypeP& t) {
                 args.push_back(ngens >= 2 ? resolveType(t->generics[1]) : unkTy());
                 return nominalWithArgs(TyK::Struct, "result", std::move(args));
             }
+
+            // `any` / `dynamic` — the dynamic type. It is a real, usable type:
+            // the checker defers anything against it (assignable/unify are
+            // already permissive for Unknown), and the runtime dispatches on the
+            // value's tag. `dynamic` is spelled as an alias for `any`.
+            if (n == "any" || n == "dynamic") return unkTy();
 
             // nominal user types
             if (structs_.count(n)) {
@@ -753,6 +924,19 @@ bool Checker::assignable(const TyP& from, const TyP& to) const {
     if (from->isUnknown() || to->isUnknown()) return true;
     if (equal(from, to)) return true;
     if (to->is(TyK::TypeVar) || from->is(TyK::TypeVar)) return true;
+
+    // Single inheritance subtyping: a derived struct is assignable to any of
+    // its transitively-present base structs.
+    if (from->is(TyK::Struct) && to->is(TyK::Struct)) {
+        const std::string derived = from->name, base = to->name;
+        std::string cur = derived;
+        while (!cur.empty() && cur != base) {
+            auto it = structDecls_.find(cur);
+            if (it == structDecls_.end()) break;
+            cur = it->second->baseName;
+        }
+        if (cur == base) return true;
+    }
 
     auto kFrom = from->k, kTo = to->k;
 
@@ -991,6 +1175,11 @@ std::optional<FuncSig> Checker::methodLookup(const TyP& recv,
             s.ret = genTy(unkTy());
             return s;
         }
+        if ((name == "collect" || name == "to_list") && recv->is(TyK::Gen)) {
+            FuncSig s;
+            s.ret = listTy(elem);
+            return s;
+        }
         if (name == "sum") {
             FuncSig s;
             s.ret = elem && elem->is(TyK::Int) ? intTy()
@@ -1003,6 +1192,54 @@ std::optional<FuncSig> Checker::methodLookup(const TyP& recv,
             s.names.push_back("sep");
             s.ret = strTy();
             return s;
+        }
+        if (name == "len") {                       // xs.len() -> int
+            FuncSig s; s.ret = intTy(); return s;
+        }
+        if (name == "pop") {                       // xs.pop() -> elem
+            FuncSig s; s.ret = elem; return s;
+        }
+        if (name == "shift") {                     // xs.shift() -> elem
+            FuncSig s; s.ret = elem; return s;
+        }
+        if (name == "next" && recv->is(TyK::List)) {  // xs.next() -> elem?
+            FuncSig s; s.ret = optTy(elem); return s;
+        }
+        if (name == "fold" && recv->is(TyK::List)) {  // xs.fold(f, [init])
+            FuncSig s;
+            s.params.push_back(fnTy({unkTy(), elem}, unkTy()));
+            s.names.push_back("f");
+            s.params.push_back(unkTy());          // optional init accumulator
+            s.names.push_back("init");
+            s.ret = unkTy();
+            s.required = 1;
+            return s;
+        }
+        if (name == "extend") {                    // xs.extend(ys)
+            FuncSig s;
+            s.params.push_back(recv); s.names.push_back("ys");
+            s.ret = noneTy(); return s;
+        }
+        if (name == "reverse") {
+            FuncSig s; s.ret = noneTy(); return s;
+        }
+        if (name == "clear") {
+            FuncSig s; s.ret = noneTy(); return s;
+        }
+        if (name == "contains") {                  // xs.contains(x) -> bool
+            FuncSig s;
+            s.params.push_back(elem); s.names.push_back("x");
+            s.ret = boolTy(); return s;
+        }
+        if (name == "index") {                     // xs.index(x) -> int (-1 absent)
+            FuncSig s;
+            s.params.push_back(elem); s.names.push_back("x");
+            s.ret = intTy(); return s;
+        }
+        if (name == "remove") {                    // xs.remove(x)
+            FuncSig s;
+            s.params.push_back(elem); s.names.push_back("x");
+            s.ret = noneTy(); return s;
         }
         return std::nullopt;
     }
@@ -1025,6 +1262,25 @@ std::optional<FuncSig> Checker::methodLookup(const TyP& recv,
             s.ret = optTy(argAt(recv, 1));
             return s;
         }
+        if (name == "len") {                       // d.len() -> int
+            FuncSig s; s.ret = intTy(); return s;
+        }
+        if (name == "remove") {                    // d.remove(key)
+            FuncSig s;
+            s.params.push_back(argAt(recv, 0)); s.names.push_back("key");
+            s.ret = noneTy(); return s;
+        }
+        if (name == "contains") {                  // d.contains(key) -> bool
+            FuncSig s;
+            s.params.push_back(argAt(recv, 0)); s.names.push_back("key");
+            s.ret = boolTy(); return s;
+        }
+        if (name == "setdefault") {                // d.setdefault(k, def) -> val
+            FuncSig s;
+            s.params.push_back(argAt(recv, 0)); s.names.push_back("key");
+            s.params.push_back(argAt(recv, 1)); s.names.push_back("def");
+            s.ret = argAt(recv, 1); return s;
+        }
         return std::nullopt;
     }
 
@@ -1035,6 +1291,19 @@ std::optional<FuncSig> Checker::methodLookup(const TyP& recv,
             s.names.push_back("x");
             s.ret = noneTy();
             return s;
+        }
+        if (name == "len") {                       // st.len() -> int
+            FuncSig s; s.ret = intTy(); return s;
+        }
+        if (name == "remove") {                    // st.remove(x)
+            FuncSig s;
+            s.params.push_back(argAt(recv, 0)); s.names.push_back("x");
+            s.ret = noneTy(); return s;
+        }
+        if (name == "contains") {                  // st.contains(x) -> bool
+            FuncSig s;
+            s.params.push_back(argAt(recv, 0)); s.names.push_back("x");
+            s.ret = boolTy(); return s;
         }
         return std::nullopt;
     }
@@ -1053,7 +1322,7 @@ std::optional<FuncSig> Checker::methodLookup(const TyP& recv,
         if (name == "upper" || name == "to_upper") {
             FuncSig s; s.ret = strTy(); return s;
         }
-        if (name == "trim") {
+        if (name == "trim" || name == "strip") {
             FuncSig s; s.ret = strTy(); return s;
         }
         if (name == "c_ptr") {
@@ -1062,6 +1331,48 @@ std::optional<FuncSig> Checker::methodLookup(const TyP& recv,
         if (name == "to_int") {
             FuncSig s; s.ret = optTy(intTy()); return s;
         }
+        if (name == "len") {                       // s.len() -> int
+            FuncSig s; s.ret = intTy(); return s;
+        }
+        if (name == "repeat") {                    // s.repeat(n) -> string
+            FuncSig s;
+            s.params.push_back(intTy()); s.names.push_back("n");
+            s.ret = strTy(); return s;
+        }
+        if (name == "contains") {                  // s.contains(sub) -> bool
+            FuncSig s;
+            s.params.push_back(strTy()); s.names.push_back("sub");
+            s.ret = boolTy(); return s;
+        }
+        if (name == "starts_with" || name == "startsWith") {
+            FuncSig s;
+            s.params.push_back(strTy()); s.names.push_back("prefix");
+            s.ret = boolTy(); return s;
+        }
+        if (name == "ends_with" || name == "endsWith") {
+            FuncSig s;
+            s.params.push_back(strTy()); s.names.push_back("suffix");
+            s.ret = boolTy(); return s;
+        }
+        if (name == "replace") {                   // s.replace(from, to)
+            FuncSig s;
+            s.params.push_back(strTy()); s.names.push_back("from");
+            s.params.push_back(strTy()); s.names.push_back("to");
+            s.ret = strTy(); return s;
+        }
+        if (name == "find") {                      // s.find(sub) -> int (-1 if absent)
+            FuncSig s;
+            s.params.push_back(strTy()); s.names.push_back("sub");
+            s.ret = intTy(); return s;
+        }
+        if (name == "capitalize") {
+            FuncSig s; s.ret = strTy(); return s;
+        }
+        return std::nullopt;
+    }
+
+    if (recv->is(TyK::EnumVal)) {
+        if (name == "to_int") { FuncSig s; s.ret = intTy(); return s; }
         return std::nullopt;
     }
 
@@ -1091,15 +1402,79 @@ std::optional<FuncSig> Checker::methodLookup(const TyP& recv,
 
 // ================================ statements ================================
 
+// A `goto` may not jump over a statement that introduces a binding or a
+// noun (declaring statements): the checker rejects forward jumps that cross
+// one. Backward jumps re-run the code (loop semantics) and are allowed.
+static bool isLegacyGotoDecl(ast::StKind k) {
+    switch (k) {
+        case ast::StKind::VarDecl:
+        case ast::StKind::ConstDecl:
+        case ast::StKind::LocalDecl:
+        case ast::StKind::TempDecl:
+        case ast::StKind::BucketDecl:
+        case ast::StKind::FuncDef:
+        case ast::StKind::StructDef:
+        case ast::StKind::EnumDef:
+        case ast::StKind::TraitDef:
+        case ast::StKind::ImplDef:
+        case ast::StKind::Import:
+        case ast::StKind::Export:
+            return true;
+        default:
+            return false;
+    }
+}
+
 void Checker::checkBlock(const std::vector<ast::StmtP>& body) {
+    std::map<std::string, std::size_t> labels;
+    for (std::size_t i = 0; i < body.size(); ++i)
+        if (body[i]->kind == StKind::Label) {
+            auto [it, ok] = labels.emplace(body[i]->label, i);
+            if (!ok)
+                error(body[i]->span,
+                      "label '" + body[i]->label + "' is defined more than once");
+        }
+    labelScopes_.push_back(std::move(labels));
     bool unreachable = false;
-    for (const auto& st : body) {
+    for (std::size_t idx = 0; idx < body.size(); ++idx) {
+        const auto& st = body[idx];
         if (unreachable) {
             warning(SpanRange::point(st->span.line, st->span.col), "W0104",
                     "unreachable statement (dead code)");
             break;   // report once per block
         }
         checkStmt(*st);
+        if (st->kind == StKind::Goto) {
+            // a goto may target a label in this block or any enclosing block;
+            // it may never jump INTO a nested block (labels in nested blocks
+            // are not visible here). Declaration-crossing is only checked for
+            // same-block forward jumps.
+            bool found = false;
+            for (auto itl = labelScopes_.rbegin(); itl != labelScopes_.rend();
+                 ++itl) {
+                auto it = itl->find(st->label);
+                if (it == itl->end()) continue;
+                found = true;
+                if (itl == labelScopes_.rbegin()) {   // same block
+                    if (it->second > idx) {           // forward jump
+                        bool crossed = false;
+                        for (std::size_t j = idx + 1; j < it->second; ++j)
+                            if (isLegacyGotoDecl(body[j]->kind)) {
+                                crossed = true;
+                                break;
+                            }
+                        if (crossed)
+                            error(st->span,
+                                  "goto may not jump over a declaration");
+                    }
+                }
+                break;
+            }
+            if (!found)
+                error(st->span,
+                      "goto: label '" + st->label +
+                          "' is not declared in this block or an enclosing block");
+        }
         switch (st->kind) {
             case StKind::Return:
             case StKind::Raise:
@@ -1111,6 +1486,7 @@ void Checker::checkBlock(const std::vector<ast::StmtP>& body) {
                 break;
         }
     }
+    labelScopes_.pop_back();
 }
 
 void Checker::requireBool(const TyP& t, uint32_t line, uint32_t col,
@@ -1140,9 +1516,11 @@ void Checker::assignTarget(const ast::Expr& tgt, const TyP& vt, bool multi) {
             if (!ex) {
                 declareLocal(SymK::Var, tgt.text, vt, /*mut*/ multi,
                              tgt.span.line, tgt.span.col);
+                typeCache_[&tgt] = vt;   // codegen: tag implicit bindings
                 return;
             }
             checkReassignable(tgt);
+            typeCache_[&tgt] = ex->type ? ex->type : unkTy();
             break;
         }
         case ExKind::Index:
@@ -1218,7 +1596,35 @@ void Checker::checkFuncLike(const ast::Stmt& s, TyP selfTy, SymP funcSym) {
     Save<TyP> selfG(selfTy_);
     Save<TyP> retG(currentRet_);
     Save<int> loopG(loopDepth_);
+    Save<bool> genG(inGen_);
+    Save<TyP> elemG(genElem_);
     selfTy_ = std::move(selfTy);
+
+    const bool gen = (s.isGenerator || containsYieldStmt(s)) && !s.externDef;
+    if (gen && !s.isGenerator) const_cast<ast::Stmt&>(s).isGenerator = true;
+    inGen_ = false;
+    genElem_ = nullptr;
+    if (gen) {
+        if (funcSym) {
+            if (!funcSym->sig.ret || !funcSym->sig.ret->is(TyK::Gen)) {
+                if (funcSym->sig.ret && !funcSym->sig.ret->isUnknown() &&
+                    !funcSym->sig.ret->is(TyK::None))
+                    error(s.span, "generator function '" + s.name +
+                                      "' must declare return type generator[...], got " +
+                                      toString(*funcSym->sig.ret));
+                funcSym->sig.ret = genTy(unkTy());
+            }
+            inGen_ = true;
+            genElem_ = funcSym->sig.ret->args.empty()
+                           ? unkTy()
+                           : funcSym->sig.ret->args[0];
+        } else {
+            // methods (checked with funcSym == nullptr): adopt Gen; the
+            // effective return type is not part of a stored signature here.
+            inGen_ = true;
+            genElem_ = unkTy();
+        }
+    }
     currentRet_ = funcSym ? funcSym->sig.ret : nullptr;
     loopDepth_ = 0;
 
@@ -1242,6 +1648,10 @@ void Checker::checkFuncLike(const ast::Stmt& s, TyP selfTy, SymP funcSym) {
         error(s.span,
               "function '" + s.name + "' declares a return type but has no body statements");
     checkBlock(s.body);
+    if (inGen_ && funcSym) {
+        TyP elem = genElem_ ? genElem_ : noneTy();
+        funcSym->sig.ret = genTy(elem);
+    }
     pop();
 }
 
@@ -1280,7 +1690,7 @@ void Checker::checkPatternBindings(const ast::Pat& p, const TyP& subject) {
         }
 
         case PatKind::Tuple: {
-            if (subject && subject->is(TyK::Tuple) && p.restName.empty() &&
+            if (subject && subject->is(TyK::Tuple) && !p.hasRest &&
                 subject->args.size() != p.elems.size())
                 error(p.span,
                       "tuple pattern has " + std::to_string(p.elems.size()) +
@@ -1415,6 +1825,10 @@ void Checker::checkPatternBindings(const ast::Pat& p, const TyP& subject) {
 
         case PatKind::Rest:
             break;
+
+        case PatKind::Ref:
+            if (p.inner) checkPatternBindings(*p.inner, subject);
+            break;
     }
 }
 
@@ -1422,6 +1836,104 @@ void Checker::checkStmt(const ast::Stmt& s) {
     switch (s.kind) {
         case StKind::Pass:
             break;
+
+        case StKind::Del: {
+            if (s.exprs.empty()) break;
+            const ast::Expr& tgt = *s.exprs[0];
+            if (tgt.kind == ExKind::Ident) {
+                Symbol* sym = scope_->find(tgt.text);
+                if (!sym)
+                    error(tgt.span, "del: undefined variable '" + tgt.text + "'");
+                else if (sym->kind == SymK::Const)
+                    error(tgt.span, "del: cannot delete constant '" + tgt.text + "'");
+                else
+                    // `x = 55; del x;` intentionally creates then destroys a
+                    // binding — that is a legitimate use, so never lint it as
+                    // an unused variable.
+                    sym->used = true;
+            } else {
+                checkExpr(tgt);   // del d[k] / del xs[i] / del obj.f: check validity
+            }
+            break;
+        }
+
+        case StKind::LocalDecl: {
+            if (!s.target || s.target->kind != ExKind::Ident) {
+                if (s.value) checkExpr(*s.value);
+                break;
+            }
+            const std::string& n = s.target->text;
+            TyP ann = s.declType ? resolveType(s.declType) : nullptr;
+            TyP vt = s.value ? checkExpr(*s.value) : unkTy();
+            if (ann && !assignable(vt, ann))
+                error(s.span, "local '" + n + "' declared as " + toString(*ann) +
+                                  " but initialized with " + toString(*vt));
+            // declareLocal errors on same-scope duplicates and warns when
+            // shadowing an outer binding — exactly the strict `local` contract.
+            declareLocal(SymK::Var, n, ann ? ann : (vt ? vt : unkTy()), true,
+                         s.span.line, s.span.col);
+            break;
+        }
+
+        case StKind::GlobalDecl: {
+            if (!s.target || s.target->kind != ExKind::Ident) { break; }
+            const std::string& n = s.target->text;
+            TyP ann = s.declType ? resolveType(s.declType) : nullptr;
+            TyP vt = s.value ? checkExpr(*s.value) : unkTy();
+            // Must already exist at module top level (strict).
+            Symbol* g = scope_->find(n);
+            if (!g || g->homeScope != rootScopeId_)
+                error(s.span, "global '" + n + "' is not defined at module top level");
+            else if (g->kind != SymK::Var && g->kind != SymK::Const)
+                error(s.span, "global '" + n + "' is not a mutable variable");
+            if (s.value) {
+                if (!g) declareLocal(SymK::Var, n, ann ? ann : (vt ? vt : unkTy()),
+                                     true, s.span.line, s.span.col);
+                else { g->mut = true; }   // may assign from anywhere
+            }
+            (void)vt;
+            break;
+        }
+
+        case StKind::TempDecl: {
+            const std::string& n = s.tempVarName;
+            int budget = s.tempBudget;
+            if (budget < 1 || budget > 10)
+                error(s.span, "temp usage limit must be between 1 and 10 (got " +
+                                  std::to_string(budget) + ")");
+            TyP ann = s.declType ? resolveType(s.declType) : nullptr;
+            TyP vt = s.value ? checkExpr(*s.value) : unkTy();
+            SymP t = declareLocal(SymK::Var, n, ann ? ann : (vt ? vt : unkTy()),
+                                  true, s.span.line, s.span.col);
+            t->tempBudget = budget;
+            t->tempRemaining = budget;
+            break;
+        }
+
+        case StKind::BucketDecl: {
+            const std::string& n = s.tempVarName;
+            if (s.bucketRelease) {
+                if (!scope_->find(n) && false) {}
+            } else {
+                // parking: name becomes unavailable in normal scope
+                declareLocal(SymK::Var, n,
+                             s.value ? checkExpr(*s.value) : unkTy(), true,
+                             s.span.line, s.span.col);
+            }
+            break;
+        }
+
+        case StKind::Yield: {
+            if (!inGen_) {
+                error(s.span, "'yield' outside of a generator function");
+                break;
+            }
+            TyP et = !s.exprs.empty() ? checkExpr(*s.exprs[0]) : noneTy();
+            genElem_ = genElem_ ? unify(genElem_, et, s.span.line, s.span.col,
+                                        "yield element type")
+                                : et;
+            break;
+        }
 
         case StKind::VarDecl:
         case StKind::ConstDecl: {
@@ -1481,6 +1993,12 @@ void Checker::checkStmt(const ast::Stmt& s) {
         }
 
         case StKind::Return: {
+            if (inGen_) {
+                if (!s.exprs.empty())
+                    error(s.span,
+                          "generator functions cannot 'return' a value; use 'yield'");
+                break;
+            }
             TyP vt;
             if (!s.exprs.empty()) vt = checkExpr(*s.exprs[0]);
             else vt = noneTy();
@@ -1598,6 +2116,7 @@ void Checker::checkStmt(const ast::Stmt& s) {
                 checkBlock(arm.body);
                 pop();
             }
+            checkExhaustiveness(subj, s.arms, s.span.line, s.span.col);
             break;
         }
 
@@ -1620,20 +2139,102 @@ void Checker::checkStmt(const ast::Stmt& s) {
             break;
         }
 
+        case StKind::DoWhile:
+            if (s.pat) {
+                // search-driven form: `do { ... } while (pat = expr) ;` —
+                // the pattern binds the condition value each round
+                TyP c = s.cond ? checkExpr(*s.cond) : errTy();
+                ++loopDepth_;
+                push();
+                if (c && !c->isError())
+                    checkPatternBindings(*s.pat, unwrapOpt(c));
+                checkBlock(s.body);
+                pop();
+                --loopDepth_;
+            } else {
+                if (s.cond) requireBool(checkExpr(*s.cond), s.span.line,
+                                        s.span.col, "do-while condition");
+                ++loopDepth_;
+                push();
+                checkBlock(s.body);
+                pop();
+                --loopDepth_;
+            }
+            break;
+
+        case StKind::Gather: {
+            // worklist loop: `gather { seeds } { body }`; `item` holds each
+            // dequeued element, `gather <expr>,` re-queues more.
+            TyP elem = unkTy();
+            for (size_t i = 0; i < s.seedExprs.size(); ++i) {
+                TyP t = checkExpr(*s.seedExprs[i]);
+                if (i == 0) elem = t;
+            }
+            ++gatherDepth_;
+            ++loopDepth_;
+            push();
+            declareLocal(SymK::Var, "item", elem, /*mut*/ true, s.span.line,
+                         s.span.col);
+            checkBlock(s.body);
+            pop();
+            --loopDepth_;
+            --gatherDepth_;
+            break;
+        }
+
+        case StKind::GatherStmt:
+            if (gatherDepth_ <= 0)
+                error(s.span,
+                      "'gather <expr>,' may only appear inside a gather { } loop");
+            else if (!s.exprs.empty())
+                checkExpr(*s.exprs[0]);
+            break;
+
+        case StKind::Goto:
+            // target existence / decl-crossing are validated in checkBlock
+            break;
+
+        case StKind::Label:
+            if (!s.body.empty()) checkStmt(*s.body[0]);
+            break;
+
         case StKind::Unsafe:
             push();
             checkBlock(s.body);
             pop();
             break;
 
+        case StKind::Try: {
+            push();
+            checkBlock(s.body);
+            pop();
+            push();
+            if (!s.catchParam.empty())
+                declareLocal(SymK::Var, s.catchParam, unkTy(), /*mut*/ true,
+                             s.span.line, s.span.col);
+            checkBlock(s.elseBody);
+            pop();
+            break;
+        }
+
         case StKind::FuncDef: {
             auto sym = std::make_shared<Symbol>();
             sym->kind = SymK::Func;
             sym->name = s.name;
+            sym->pub = s.pub;
             TvGuard tv(typeVars_, s.typeParams);
             sym->sig = resolveSig(s.params, s.ret, false);
-            declareLocal(SymK::Func, s.name, nullptr, false,
-                         s.span.line, s.span.col);
+            if (containsYieldStmt(s)) {
+                const_cast<ast::Stmt&>(s).isGenerator = true;
+                if (!s.ret) sym->sig.ret = genTy(unkTy());
+            }
+            // Declare the REAL symbol (with its signature) into the current
+            // scope. Previously we passed a bare name to declareLocal, creating
+            // a second empty-signature Symbol, so calls to a nested function
+            // failed "too many arguments". Mirror registerTopLevel.
+            if (Symbol* clash = scope_->declare(sym))
+                error(s.span.line, s.span.col,
+                      "duplicate definition of '" + s.name + "'");
             funcs_[s.name] = sym;
             if (!s.externDef) checkFuncLike(s, nullptr, sym);
             break;
@@ -1647,6 +2248,80 @@ void Checker::checkStmt(const ast::Stmt& s) {
             SymP im = declareLocal(SymK::ImportRoot, root, unkTy(), false,
                                    s.span.line, s.span.col);
             im->importStmt = &s;
+            break;
+        }
+
+        case StKind::StructDef: {
+            // natively nested class/struct: register into the current scope so
+            // construction (Point(...)) and member access work inside blocks.
+            // Top-level structs are registered by registerNominals/checkModule.
+            if (scope_->id == rootScopeId_) break;
+            auto sym = std::make_shared<Symbol>();
+            sym->kind = SymK::Struct;
+            sym->name = s.name;
+            sym->pub = s.pub;
+            structs_[s.name] = sym;
+            structDecls_[s.name] = &s;
+            if (Symbol* clash = scope_->declare(sym))
+                error(s.span, "duplicate definition of '" + s.name + "'");
+            fillStructBody(sym, s);
+            Save<TyP> selfGuard(selfTy_);
+            selfTy_ = lookupNominal(TyK::Struct, s.name);
+            TvGuard tv(typeVars_, s.typeParams);
+            for (const auto& m : s.body)
+                if (m->kind == StKind::FuncDef) checkFuncLike(*m, selfTy_, nullptr);
+            break;
+        }
+
+        case StKind::EnumDef: {
+            // natively nested enum: declare the name + variants in this scope.
+            // Top-level enums are registered by registerNominals/registerEnums.
+            if (scope_->id == rootScopeId_) break;
+            auto sym = std::make_shared<Symbol>();
+            sym->kind = SymK::EnumName;
+            sym->name = s.name;
+            enums_[s.name] = sym;
+            if (Symbol* clash = scope_->declare(sym))
+                error(s.span, "duplicate definition of '" + s.name + "'");
+            TvGuard tv(typeVars_, s.typeParams);
+            for (const auto& v : s.variants) {
+                sym->variants.push_back(v.name);
+                auto vs = std::make_shared<Symbol>();
+                vs->kind = SymK::EnumVariant;
+                vs->name = v.name;
+                vs->enumOf = s.name;
+                for (const auto& p : v.payload)
+                    vs->payloads.emplace_back(p.name, resolveType(p.type));
+                for (const auto& p : vs->payloads)
+                    sym->variantPayloads[v.name].push_back(p);
+                if (Symbol* clash = scope_->declare(vs))
+                    error(v.span, "'" + v.name + "' is already defined");
+            }
+            break;
+        }
+
+        case StKind::TraitDef: {
+            if (scope_->id == rootScopeId_) break;
+            SymP sym;
+            auto it = traits_.find(s.name);
+            if (it != traits_.end()) {
+                sym = it->second;                 // builtin predeclared
+                sym->pub = s.pub;
+            } else {
+                sym = std::make_shared<Symbol>();
+                sym->kind = SymK::Trait;
+                sym->name = s.name;
+                traits_[s.name] = sym;
+            }
+            if (Symbol* clash = scope_->declare(sym))
+                error(s.span, "duplicate definition of '" + s.name + "'");
+            TvGuard tv(typeVars_, s.typeParams);
+            for (const auto& sg : s.sigs)
+                sym->sigs[sg.name] =
+                    resolveSig(sg.params, sg.ret, /*stripSelf*/ true);
+            for (const auto& m : s.body)
+                if (m->kind == StKind::FuncDef && !sym->sigs.count(m->name))
+                    sym->sigs[m->name] = resolveSig(m->params, m->ret, true);
             break;
         }
 
@@ -1691,9 +2366,18 @@ TyP Checker::checkExprImpl(const ast::Expr& e) {
             Symbol* sym = scope_->find(e.text);
             if (!sym) {
                 if (importRoots_.count(e.text)) return unkTy();
+                // `bucket` names live in the separate bucket store; still allow
+                // them to be referenced (checked separately).
                 error(e.span,
                       "undefined variable '" + e.text + "'");
                 return errTy();
+            }
+            if (sym->tempRemaining > 0) {
+                sym->tempRemaining -= 1;
+                if (sym->tempRemaining < 0) sym->tempRemaining = 0;
+            } else if (sym->tempBudget > 0 && sym->tempRemaining == 0) {
+                error(e.span, "temp '" + e.text + "' exhausted (" +
+                                  std::to_string(sym->tempBudget) + " uses)");
             }
             sym->used = true;
             if (sym->kind == SymK::Func)
@@ -1915,6 +2599,25 @@ TyP Checker::checkExprImpl(const ast::Expr& e) {
         }
 
         case ExKind::Lambda: {
+            if (!e.lambdaBody.empty()) {
+                // block-bodied closure: `fn (params) [-> T] { stmts }`
+                Save<TyP> retG(currentRet_);
+                Save<int> loopG(loopDepth_);
+                currentRet_ = e.retType ? resolveType(e.retType) : nullptr;
+                loopDepth_ = 0;
+                push();
+                std::vector<TyP> ps;
+                for (const auto& p : e.closureParams) {
+                    TyP pt = p.type ? resolveType(p.type) : unkTy();
+                    declareLocal(SymK::Param, p.name, pt, p.mutable_,
+                                 p.span.line, p.span.col);
+                    ps.push_back(std::move(pt));
+                }
+                checkBlock(e.lambdaBody);
+                pop();
+                TyP ret = e.retType ? resolveType(e.retType) : unkTy();
+                return fnTy(std::move(ps), ret);
+            }
             push();
             for (const auto& p : e.lambdaParams)
                 declareLocal(SymK::Param, p, unkTy(), true, e.span.line,
@@ -1988,6 +2691,35 @@ TyP Checker::checkExprImpl(const ast::Expr& e) {
         case ExKind::Cast: {
             if (e.lhs) checkExpr(*e.lhs);
             return resolveType(e.newType);
+        }
+
+        case ExKind::Match: {
+            // `match subj { case pat [if g] { body } ... }` (expression form).
+            TyP subj = e.lhs ? checkExpr(*e.lhs) : unkTy();
+            TyP result;
+            for (const auto& arm : e.matchArms) {
+                push();
+                if (arm.pat) checkPatternBindings(*arm.pat,
+                                                   unwrapOpt(subj));
+                if (arm.guard) requireBool(checkExpr(*arm.guard), e.span.line,
+                                           e.span.col, "match guard");
+                // type the arm body; trailing expression establishes the arm's
+                // value type, unified across arms.
+                for (const auto& st : arm.body) {
+                    checkStmt(*st);
+                    // arm value type: a trailing expression statement yields
+                    // its checked type; unified across arms.
+                    if (st == arm.body.back() &&
+                        st->kind == StKind::ExprStmt && !st->exprs.empty()) {
+                        TyP vt = checkExpr(*st->exprs[0]);
+                        result = unify(result, vt, e.span.line, e.span.col,
+                                       "match arms");
+                    }
+                }
+                pop();
+            }
+            checkExhaustiveness(subj, e.matchArms, e.span.line, e.span.col);
+            return result ? result : unkTy();
         }
     }
     return unkTy();
@@ -2292,6 +3024,69 @@ TyP Checker::checkEnumCtorCall(const Symbol* vs,
     return vt;
 }
 
+void Checker::checkExhaustiveness(const TyP& subj,
+                                  const std::vector<ast::MatchArm>& arms,
+                                  uint32_t line, uint32_t col) {
+    if (!subj) return;
+    std::string enumName;
+    bool isEnum = false;
+    if (subj->is(TyK::EnumName))  { enumName = subj->name; isEnum = true; }
+    if (subj->is(TyK::EnumVal))   { enumName = subj->name; isEnum = true; }
+    if (isEnum) {
+        auto ei = enums_.find(enumName);
+        if (ei == enums_.end()) return;
+        std::set<std::string> covered;
+        bool wild = false;
+        for (const auto& arm : arms)
+            if (arm.pat)
+                collectPatCoverage(*arm.pat, covered, wild, enumName, scope_);
+        if (wild) return;
+        std::vector<std::string> missing;
+        for (const auto& v : ei->second->variants)
+            if (!covered.count(v)) missing.push_back(v);
+        if (missing.empty()) return;
+        std::string msg =
+            "non-exhaustive match over enum '" + enumName + "': missing";
+        for (const auto& m : missing) msg += " '" + m + "'";
+        error(line, col, msg);
+        return;
+    }
+    if (subj->is(TyK::Int) || subj->is(TyK::Char)) {
+        bool wild = false;
+        for (const auto& arm : arms)
+            if (arm.pat && arm.pat->kind == ast::PatKind::Wild) {
+                wild = true;
+                break;
+            }
+        if (!wild)
+            error(line, col,
+                  "match over integers/chars is non-exhaustive: add a "
+                  "'case _' wildcard arm");
+    }
+}
+
+TyP Checker::genericApply(const Symbol* sym,
+                          const std::vector<ast::CallArg>& args, uint32_t line,
+                          uint32_t col) {
+    TyP ret = sym->sig.ret;
+    if (sym->typeDefaults.empty()) return ret ? ret : unkTy();
+
+    std::map<std::string, TyP> activ;
+    for (const auto& kv : sym->typeDefaults) activ[kv.first] = kv.second;
+    size_t pi = 0;
+    for (const auto& a : args) {
+        if (a.name.empty() && pi < sym->sig.params.size() &&
+            sym->sig.params[pi] && sym->sig.params[pi]->is(TyK::TypeVar)) {
+            TyP at = checkExpr(*a.value);
+            if (at && !at->is(TyK::TypeVar) && !at->isUnknown() &&
+                !at->isError())
+                activ[sym->sig.params[pi]->name] = at;   // constraint wins
+        }
+        ++pi;
+    }
+    return substGeneric(ret, activ, line, col);
+}
+
 TyP Checker::checkCall(const ast::Expr& e) {
 
     const ast::Expr* callee = e.lhs.get();
@@ -2374,7 +3169,7 @@ TyP Checker::checkCall(const ast::Expr& e) {
             }
             matchArgs(sym->sig, e.args, e.span.line, e.span.col,
                       ("function '" + n + "'").c_str());
-            return sym->sig.ret ? sym->sig.ret : unkTy();
+            return genericApply(sym, e.args, e.span.line, e.span.col);
         }
         if (!sym) {
             if (importRoots_.count(callee->text)) {

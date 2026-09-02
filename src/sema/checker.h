@@ -97,10 +97,21 @@ private:
     TyP checkMemberCall(const TyP& recv, const std::string& name,
                         const std::vector<ast::CallArg>& args, uint32_t line,
                         uint32_t col);
+    // Resolves a generic function call's return type: constraints gathered from
+    // actual arguments win over declared defaults; unconstrained TypeVars
+    // without a default stay dynamic (inference-only generics).
+    TyP genericApply(const Symbol* sym,
+                     const std::vector<ast::CallArg>& args, uint32_t line,
+                     uint32_t col);
     bool matchArgs(const FuncSig& sig, const std::vector<ast::CallArg>& args,
                    uint32_t line, uint32_t col, const char* what);
     TyP checkEnumCtorCall(const Symbol* vs,
                           const std::vector<ast::CallArg>& args);
+    // Exhaustiveness (PLAN 5.4): enum subjects must cover every variant; a
+    // wildcard is the only way to cover an integer/char subject today.
+    void checkExhaustiveness(const TyP& subj,
+                             const std::vector<ast::MatchArm>& arms,
+                             uint32_t line, uint32_t col);
     TyP memberAccess(const TyP& obj, const std::string& name, uint32_t line,
                      uint32_t col, bool nilSafe);
 
@@ -115,7 +126,9 @@ private:
 
     DiagEngine& diags_;
     Scope* scope_ = nullptr;
+    int rootScopeId_ = 0;             // module top-level scope id (for local/global/temp)
     std::map<std::string, SymP> structs_;
+    std::map<std::string, const ast::Stmt*> structDecls_;  // name -> StructDef node
     std::map<std::string, SymP> enums_;
     std::map<std::string, SymP> traits_;
     std::set<std::pair<std::string, std::string>> impls_;   // trait -> struct
@@ -126,6 +139,12 @@ private:
     TyP selfTy_;
     TyP currentRet_;
     int loopDepth_ = 0;
+    bool inGen_ = false;       // checking a generator function body
+    TyP genElem_;              // unified element type of the yields
+    int gatherDepth_ = 0;      // >0 while checking inside a gather { } body
+    // Per-block `label name :` maps (label -> statement index), innermost
+    // first. `goto` resolves against the top map only (block-local targets).
+    std::vector<std::map<std::string, std::size_t>> labelScopes_;
     int quiet_ = 0;   // >0: error() is suppressed (speculative re-walks)
     std::set<std::string> lintAllow_;
     std::set<std::string> lintDeny_;

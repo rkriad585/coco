@@ -1,0 +1,7 @@
+# expect: temp 't' exhausted (2 uses)
+def main() {
+    temp t 2: int = 5;
+    a = t;
+    b = t;
+    c = t;
+}

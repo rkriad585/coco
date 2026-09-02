@@ -47,8 +47,15 @@ foreach ($f in (Get-ChildItem $dirPath -Filter *.co | Sort-Object Name)) {
         $code = $p.ExitCode
     }
     $p.Dispose()
+    # an `# expect-exit: N` comment marks examples that intentionally return a
+    # nonzero process exit code (e.g. a native `main() -> int` returning N).
+    $expectExit = $null
+    $expectRow = Select-String -LiteralPath $f.FullName -Pattern '#\s*expect-exit:\s*(\d+)' | Select-Object -First 1
+    if ($expectRow) { $expectExit = [int]$expectRow.Matches[0].Groups[1].Value }
+    $ok = if ($null -ne $expectExit) { $code -eq $expectExit } else { $code -eq 0 }
     $rows += [pscustomobject]@{ File = $f.Name; Code = $code; Stdout = $so; Stderr = $se }
-    if ($code -ne 0) { $failures += $f.Name }
+    if (-not $ok) { $failures += $f.Name }
+
 }
 Remove-Item -Recurse -Force $tmp -ErrorAction SilentlyContinue
 
