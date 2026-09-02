@@ -1,0 +1,11 @@
+def square(n: int) -> int {
+    return n * n;
+}
+
+def main() -> int {
+    total = 0;
+    for i in 0..100 {
+        total += square(i);
+    }
+    return total % 1000;
+}

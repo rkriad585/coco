@@ -1,0 +1,8 @@
+def main() {
+    c = "H"[0];
+    print(ord(c) >= ord('A'), ord(c) <= ord('Z'));
+    print(ord('0') <= ord(c), ord('a') < ord('b'));
+    print(ord(c) == ord('H'));
+    print("z"[0]);
+    print(len("abcde"));
+}

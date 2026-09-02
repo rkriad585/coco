@@ -1,0 +1,19 @@
+struct SB {
+    parts: list = [];
+
+    def append(self, s: string) {
+        self.parts.append(s);
+    }
+    def sstr(self) -> string {
+        out = "";
+        for p in self.parts { out += p; }
+        return out;
+    }
+}
+
+def main() {
+    var b = SB();
+    b.append("hello ");
+    b.append("world");
+    print(b.sstr());
+}

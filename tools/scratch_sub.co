@@ -1,0 +1,31 @@
+def probe_list_param(mut_lst) {
+    mut_lst[0] = 99;
+    mut_lst.append("zzz");
+}
+
+struct Lx {
+    specBuf: string = "";
+    queue: list = [];
+
+    def pushq(self, item) {
+        self.queue.append(item);
+    }
+    def growBuf(self, ch: char) {
+        self.specBuf += str(ch);
+    }
+}
+
+def main() {
+    n0 = ord('\u{0}');
+    print(n0);
+    var l = [1, 2, 3];
+    probe_list_param(l);
+    print(l);
+    var lx = Lx();
+    lx.pushq("t1");
+    lx.growBuf('x');
+    print(lx.queue, lx.specBuf, len(lx.specBuf));
+    s = "abcdef";
+    print(s[2..4] == "cd", s[0] == 'a');
+    print(chr(0));
+}

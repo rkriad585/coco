@@ -1,0 +1,6 @@
+def main() -> int {
+    for i in 0..100 {
+        continue;
+    }
+    return 7;
+}

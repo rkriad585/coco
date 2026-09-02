@@ -1,0 +1,4 @@
+def main() -> int {
+    let total = 0;
+    return total;
+}

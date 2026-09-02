@@ -1,0 +1,9 @@
+def main() {
+    print(ord('\u{0}'));
+    print(ord('\\'), ord('\''), ord('"'), ord('{'), ord('}'));
+    print(ord('\n'), ord('\r'), ord('\t'), ord(' '), ord('.'));
+    print(ord('x'), ord('e'), ord('E'), ord('+'), ord('-'));
+    print(ord('0'), ord('9'), ord('a'), ord('z'), ord('A'), ord('Z'), ord('_'));
+    s = "a\tb";
+    print(s, len(s));
+}

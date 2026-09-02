@@ -1,0 +1,1 @@
+def main() { print(os.getenv("COCO_TEST_ENV")); }
