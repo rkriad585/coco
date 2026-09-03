@@ -22,7 +22,13 @@ It also deliberately lands a **first-class, uniquely-Coco decorator/attribute sy
 existing Rust-style pattern-alias `@` operator.
 
 This document is *choice-bearing* (like `PLAN.md`): it lists concrete options, their trade-offs,
-and a recommended decision for each ratification point. Nothing here is implemented yet.
+and a recommended decision for each ratification point. **Not all of the below is future work —
+several SP phases (or their core) have already shipped** in the Coco seed: the `match`-as-expression
+core (**SP-3**), the `any`/`dynamic` type (**SP-5**), and the `fn`-alias / multi-statement block
+closures / `yield`-generator functions (**SP-11**) are implemented and verified (examples 37, 38,
+40, 41, 44). Each shipped phase is marked `[IMPLEMENTED]` at its heading below. Where a feature is
+also spec'd in another plan, a cross-reference (→) names the owning file so this doc stays the
+*syntax* owner, not a duplicate.
 
 ---
 
@@ -38,7 +44,7 @@ Deep source review (evidence base in Appendix A) establishes the current surface
 | Expressions | binary/unary ops, `..`/`..=` ranges, slices `a[1:3]`, `and/or/not/is/in`, ternary-`if`-expr, lambdas `(x)=>e`, list/dict/set literals, f-strings `f"{x:>10}"`, tuple/comprehensions, `new`, `T?`, `.?.`, `?` propagation, `name: value` named args |
 | Patterns | Wild `_`, Bind `x`, `x is T`, alias `x @ pat`, Or `a | b`, Tuple, Ctor `Point(x: 0)`, Range, Slice `[a,b,..r]`, Rest `..`, guards |
 | Types | `int/i8..u64/f32/f64/bool/char/string/bytes`, `list[T]/dict[K,V]/set[T]/tuple/T?/fn/ptr/ref`, generics `[T is Bound]`, `result[T,E]` |
-| Builtin fns (runtime.cpp:485-613) | `print, len, sqrt, ord, chr, assert, assert_eq, range, panic, catch_panic, printf, strlen` |
+| Builtin fns (runtime.cpp:485-613) | `print, len, sqrt, ord, chr, assert, assert_eq, range, panic, catch_panic, printf, strlen` **+** the Phase-WHY-1/SP-8 battery `str, int, float, bool, type, repr, sum, min, max, any, all, sorted, reversed, enumerate, map, filter, reduce, upper, lower, trim, contains, starts_with, ends_with, replace, split, join` (see `EXP_PLAN.md` §9 for the full inventory; `WHY_PLAN.md` WHY-1 for the rationale) |
 | Builtin modules | `math, time, io, mem, json, text, os` (stubs) + real `.co` stdlib |
 | Concurrency | `spawn`, `chan`, `select`, real OS threads, channels (mutex/condvar) |
 | `@` today | **Only** Rust-style pattern alias `name @ sub-pattern` (`parser.cpp`) |
@@ -192,6 +198,10 @@ suppresses an unused-var warning; pattern-alias `@` still works (example 31).
 
 ## Phase SP-2 — Assignment Expressions & the Walrus-ish `:=`
 
+> **Dedup/cross-ref:** this phase is the **syntax/grammar owner** for walrus `:=`. The broader
+> expression-sugar bundle that also uses walrus is spec'd in `EXP_PLAN.md` Phase 5 (which should
+> cross-ref here rather than re-specify the grammar). Ratify the token before either is coded.
+
 **Goal:** let a value be computed, bound, and used in one expression (Python 3.8 `:=`; C/Go
 already allow assignment-in-condition — this is the demand side of "more expressions").
 
@@ -224,7 +234,13 @@ tests/negative for `x := 5` at statement start (must still be a statement, not a
 
 ---
 
-## Phase SP-3 — Match & Switch Expressions (Java/Rust modern forms)
+## Phase SP-3 — Match & Switch Expressions (Java/Rust modern forms) — **[core IMPLEMENTED]**
+
+> **Status:** the **`match`-as-expression** core ships — a `match` yielding a value in
+> assignment/`return` positions (`s = match n { … };`, `return match t { … };`) is implemented and
+> verified in `examples/38_patterns_power.co` (VM ≡ tree-walker); see `DO_FIRST_PLAN.md` Phase 3.
+> **Still new below:** the Java-style `->` arrow-arm form and the `yield expr`-inside-an-arm form,
+> plus the `else` catch-all arm. Those are the remaining greenfield parts of this phase.
 
 **Goal:** make `match` yield a value (Java 13 `switch`-expression + `yield`; Rust `match`
 already yields) so it can be assigned, returned, and chained — a big "more expressions" win.
@@ -286,7 +302,14 @@ examples `35_english_flow.co`.
 
 ---
 
-## Phase SP-5 — Dynamic Typing: the `any` / `dynamic` Type & Duck Typing
+## Phase SP-5 — Dynamic Typing: the `any` / `dynamic` Type & Duck Typing — **[any/dynamic IMPLEMENTED]**
+
+> **Status:** the `any` (alias `dynamic`) type ships — `var x: any = 5; x = "hi"` works with the
+> checker deferring and the runtime dispatching on the value tag; verified in
+> `examples/37_dynamic_any.co` (VM ≡ tree-walker). See `DO_FIRST_PLAN.md` Phase 2.
+> **Still new below:** `typeof(x)`, `is`-type-test patterns, union `int | string`, and
+> interface-as-method-set duck typing. (→ `EXP_PLAN.md` Phase 7 for the runtime-dispatch/reflection
+> side; `WHY_PLAN.md` WHY-2 for the adoption rationale; `DATA_TYPE_PLAN.md` Phase 14 for reflect.)
 
 **Goal:** Python/TS-grade dynamic ergonomics *where the static system isn't required*, never
 weakening existing checks (extends PLAN.md Phase 5.1).
@@ -363,7 +386,15 @@ order verified; `@inject`/`@json` stdlib decorators work; corpus green; examples
 
 ---
 
-## Phase SP-8 — Builtin Function Breadth (the "more built-in functions" ask)
+## Phase SP-8 — Builtin Function Breadth (the "more built-in functions" ask) — **[largely IMPLEMENTED]**
+
+> **Status/dedup:** a large slice of this list already ships (see §0 updated row): `map filter
+> reduce any all sum max min enumerate reversed sorted upper lower trim contains starts_with
+> ends_with replace split join str int float bool type repr` are implemented free builtins
+> (`EXP_PLAN.md` §9 is the canonical inventory). **Still missing from this list:** `zip`, `flatten`,
+> `take/skip/first/last/count`, `round/floor/ceil/clamp/pow/is_even/is_odd/is_prime/rand`, `input`,
+> `typeof`, and prelude `pi`/`e` consts. The "why" is `WHY_PLAN.md` WHY-1; the function
+> names/operators are owned by `EXP_PLAN.md`.
 
 **Goal:** grow the tiny builtin set (`print,len,sqrt,ord,chr,assert,assert_eq,range,panic,
 catch_panic,printf,strlen`) into a rich, English-friendly standard surface — still **built-in /
@@ -401,6 +432,11 @@ reduce/any/all` with lambdas verified; negative tests for arity; full-call dispa
 
 ## Phase SP-9 — Collection & Comprehension Power-Up (Python/Go ergonomics)
 
+> **Dedup/cross-ref:** this phase is the **syntax** owner for splat/spread, dict/set comprehensions,
+> method-views, and ranged iteration notation. The *builtin & iteration-protocol* side is spec'd in
+> `EXP_PLAN.md` Phase 12 (→), and the adoption rationale in `WHY_PLAN.md` WHY-6 (→). `DATA_TYPE_PLAN.md`
+> Phases 9–10 own the collection *type* internals.
+
 **Goal:** richer literal/expression forms for collections — the "more expressions" heart.
 
 **Feature list**
@@ -433,6 +469,11 @@ negatives for missing splat keys / bad slice targets.
 
 ## Phase SP-10 — `for`-Over-Anything & Iteration Protocol (Go `for range` breadth)
 
+> **Dedup/cross-ref:** `for` over dict/set/string/bytes/generator already works via `iterateSeq`
+> (runtime); the open item is the **user-defined iteration protocol** (`next()`/`iter()`), whose
+> "why" is `WHY_PLAN.md` WHY-3 (→). The free-function builtins `enumerate/zip/map/filter` that this
+> phase leans on are owned by `EXP_PLAN.md` §9 / Phase 12.
+
 **Goal:** make iteration uniform and English-friendly across all collection-like values.
 
 **Feature list**
@@ -458,7 +499,13 @@ corpus green; negatives for non-iterable custom `for`.
 
 ---
 
-## Phase SP-11 — `fn` Alias, Multi-Statement Closures & `yield`-Lambdas (TS/Rust sugar)
+## Phase SP-11 — `fn` Alias, Multi-Statement Closures & `yield`-Lambdas (TS/Rust sugar) — **[core IMPLEMENTED]**
+
+> **Status:** the **`fn` alias for `def`** (`parser.cpp:252` `fn == def`), **multi-statement block
+> closures** `map(xs, fn (v) { stmts })` (example 44), and **`yield`-based generator functions**
+> (example 41) are implemented end-to-end (VM ≡ tree-walker). See `DO_FIRST_PLAN.md` Phases 2 &
+> 3.5 & 4. **Still new:** only the *resumable-frame* generator design (the current generators
+> materialize eagerly) and any further closure ergonomics.
 
 **Goal:** friendlier function forms for programmers coming from Go/Rust/TS (extends PLAN.md Phase
 11.1).
@@ -671,6 +718,12 @@ SP-17 consolidation (fmt/doc/editions) cross-cuts all
 
 **Short version for a single dev:** 1 → 2 → 3 → 4 → 8 → 5 → 9 → 10 → 11 → 12 → 6 → 7 →
 13 → 14 → 15 → 16 → 17.
+
+> **Status overlay (dedup — which phases are effectively done):** the cores of **SP-3** (match
+> expr), **SP-5** (any/dynamic), and **SP-11** (fn-alias / block closures / generators) are
+> **implemented**; much of **SP-8** is implemented. The genuinely-open high-value work is SP-1
+> (decorators), SP-2 (walrus), SP-9 (comprehensions/splat), SP-10 (iteration protocol), SP-12
+> (type surface), and SP-13 (pattern parity).
 
 For **maximum user-visible benefit quickly**: SP-1 (decorators) → SP-8 (builtins) → SP-2 (walrus)
 → SP-3 (match-expr) → SP-4 (English flow) → SP-9 (collections) → SP-5 (any/typeof).

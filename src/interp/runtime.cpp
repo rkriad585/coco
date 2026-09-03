@@ -1268,9 +1268,20 @@ Value Interpreter::loadModuleFile(const std::string& dottedRaw) {
                 break;
             case ast::StKind::StructDef:
                 structs_[s.name] = &s;
+                // export `pub struct`/`pub class` through the module namespace
+                // so consumers can reference `mod.Type` and construct it.
+                if (s.pub && !s.privateDecl)
+                    modEnv->vars[s.name] = Value::module("__struct__:" + s.name);
                 break;
             case ast::StKind::EnumDef:
                 enums_[s.name] = &s;
+                if (s.pub && !s.privateDecl)
+                    modEnv->vars[s.name] = Value::module("__enum__:" + s.name);
+                break;
+            case ast::StKind::TraitDef:
+                traits_[s.name] = &s;
+                if (s.pub && !s.privateDecl)
+                    modEnv->vars[s.name] = Value::module("__trait__:" + s.name);
                 break;
             case ast::StKind::Import: {
                 // modules importing other modules bind into their own namespace
@@ -2157,6 +2168,17 @@ Value Interpreter::eval(const Expr& e, Env env) {
                 const Expr& m = *e.lhs;
                 Value recv = eval(*m.lhs, env);
                 if (m.nilSafe && recv.isNone()) return Value::none();
+                // module-qualified type reference: `collections.HashMap(f:..)`
+                if (recv.k == VK::Module && !m.nilSafe) {
+                    Value mem = memberRead(recv, m.text, e.span.line, e.span.col);
+                    if (mem.k == VK::Module &&
+                        mem.typeName.rfind("__struct__:", 0) == 0)
+                        return makeStruct(mem.typeName.substr(11), e.args, env);
+                    if (mem.k == VK::Module &&
+                        mem.typeName.rfind("__enum__:", 0) == 0)
+                        return makeEnumV(mem.typeName.substr(9), m.text, e.args,
+                                         env, e.span.line, e.span.col);
+                }
                 bool lval = m.lhs->kind == ast::ExKind::Ident ||
                             m.lhs->kind == ast::ExKind::Index ||
                             m.lhs->kind == ast::ExKind::Member;
@@ -3738,10 +3760,26 @@ Value Interpreter::makeStruct(const std::string& name,
         }
         if (fd.defaultValue)
             v.fields.emplace_back(fd.name, eval(*fd.defaultValue, env));
+        else if (auto def = containerDefaultFor(fd.type))
+            v.fields.emplace_back(fd.name, std::move(*def));
         else
             v.fields.emplace_back(fd.name, Value::none());
     }
     return v;
+}
+
+std::optional<Value> Interpreter::containerDefaultFor(const ast::TypeP& t) {
+    if (!t) return std::nullopt;
+    if (t->kind == ast::TyKind::Name) {
+        if (t->name == "dict") return Value::dict();
+        if (t->name == "list") return Value::list();
+        if (t->name == "set") return Value::set({});
+    }
+    if (t->kind == ast::TyKind::Optional) {
+        auto inner = containerDefaultFor(t->inner);
+        if (inner) return *inner;
+    }
+    return std::nullopt;
 }
 
 Value Interpreter::makeHeapValue(const std::string& name,
@@ -3763,6 +3801,8 @@ Value Interpreter::makeHeapValue(const std::string& name,
         else if (fd.defaultValue)
             hobj->fields.emplace_back(fd.name,
                                       eval(*fd.defaultValue, env));
+        else if (auto def = containerDefaultFor(fd.type))
+            hobj->fields.emplace_back(fd.name, std::move(*def));
         else
             hobj->fields.emplace_back(fd.name, Value::none());
     }
@@ -4303,6 +4343,25 @@ void Interpreter::assignTo(const Expr& target, Value v, Env env) {
         }
 
         case ast::ExKind::Index: {
+            // Prefer an in-place lvalue so mutations to a member-backed
+            // container (e.g. self.buckets[k] = v with value semantics) land
+            // in the stored field instead of a discarded copy.
+            if (Value* rp = lvaluePtr(*target.lhs, env)) {
+                Value idx2 = eval(*target.rhs, env);
+                if (rp->k == VK::List || rp->k == VK::Set ||
+                    rp->k == VK::Tuple)
+                    (*rp->vec)[normIndex((int64_t)rp->vec->size(), idx2.i)] =
+                        std::move(v);
+                else if (rp->k == VK::Dict) {
+                    for (auto& kv : *rp->map)
+                        if (valEq(kv.first, idx2)) {
+                            kv.second = std::move(v);
+                            return;
+                        }
+                    rp->map->emplace_back(std::move(idx2), std::move(v));
+                }
+                return;
+            }
             Value cont = eval(*target.lhs, env);
             if (cont.k == VK::Weak) cont = lockHeap(cont);
             Value idx = eval(*target.rhs, env);

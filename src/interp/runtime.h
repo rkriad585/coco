@@ -8,6 +8,7 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <thread>
 #include <unordered_map>
@@ -154,6 +155,7 @@ private:
                      const std::vector<ast::CallArg>& args, Env env);
     Value makeHeapValue(const std::string& name,
                         const std::vector<ast::CallArg>& args, Env env);
+    std::optional<Value> containerDefaultFor(const ast::TypeP& t);
     Value makeEnumV(const std::string& enumName, const std::string& variant,
                     const std::vector<ast::CallArg>& args, Env env,
                     int line, int col);

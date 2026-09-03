@@ -41,6 +41,7 @@ struct Symbol {
     TyP type;                         // value type (Var/Param/Const/EnumVal/...)
     bool mut = false;
     bool pub = false;
+    bool builtin = false;         // prelude builtin: overridable by user FuncDef
 
     // Lint/use-information (PLAN phase 2). Set during the body-checking pass.
     bool used = false;                // referenced anywhere as a value

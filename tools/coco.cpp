@@ -104,7 +104,7 @@ std::string todayIso() {
 // ---------------------------------------------------------------------------
 
 struct Manifest {
-    std::string name, version = "0.1.0", type = "app", main, description,
+    std::string name, version = "0.0.1-beta", type = "app", main, description,
                 license;
     std::string docs = "docs/index.md";   // docs entry file ([package] docs)
     std::string author, repo, readme = "README.md", homepage;
@@ -121,7 +121,7 @@ Manifest readManifest(const fs::path& dir) {
     if (!readFile((dir / "coco.toml").string(), text)) return m;
     Doc d = coco::tomlmini::parse(text);
     m.name = coco::tomlmini::get(d, "package", "name");
-    m.version = coco::tomlmini::get(d, "package", "version", "0.1.0");
+    m.version = coco::tomlmini::get(d, "package", "version", "0.0.1-beta");
     m.type = coco::tomlmini::get(d, "package", "type", "app");
     m.main = coco::tomlmini::get(d, "package", "main");
     m.docs = coco::tomlmini::get(d, "package", "docs", "docs/index.md");
@@ -556,7 +556,7 @@ int cmdNew(const std::string& name, bool lib) {
 
     Manifest m;
     m.name = name;
-    m.version = "0.1.0";
+    m.version = "0.0.1-beta";
     m.type = lib ? "lib" : "app";
     m.description = lib ? "A Coco library" : "A Coco application";
     m.license = "MIT";
@@ -1365,6 +1365,9 @@ int cmdTest(const std::vector<std::string>& args, size_t from) {
     auto dirs = libDirsFor(".");
     if (std::find(dirs.begin(), dirs.end(), ".") == dirs.end())
         dirs.push_back(".");
+    // the repo ships its stdlib as Coco source under ./stdlib; tests import it
+    if (std::find(dirs.begin(), dirs.end(), "./stdlib") == dirs.end())
+        dirs.push_back("./stdlib");
     int pass = 0, fail = 0;
     for (const auto& f : files) {
         std::cout << "test " << f.string() << " ... " << std::flush;
@@ -2735,7 +2738,7 @@ int buildAppShim(const Manifest& m, BuildOpts& opts) {
     std::map<std::string, std::string> embedded;
     gatherEmbedded(entry, mainSrc, embedded);
     return buildProgram(m.name,
-                        m.version.empty() ? "0.1.0" : m.version, entry,
+                        m.version.empty() ? "0.0.1-beta" : m.version, entry,
                         mainSrc, embedded, opts);
 }
 

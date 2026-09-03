@@ -1,0 +1,89 @@
+# stdlib/lib/collections.co - data-structure utilities (Coco-written, Phase 6).
+# Provides a HashMap struct plus functional list helpers. Import with:
+#   import lib.collections;
+
+# A string-keyed hash map over a runtime dict. The dict type keys are coerced
+# to strings so int/str keys unify; lookups are O(1) amortized.
+pub struct HashMap {
+    var buckets: dict;
+    def put(self, k, v) {
+        self.buckets[str(k)] = v;
+    }
+    def get(self, k) {
+        d = self.buckets;
+        return d[str(k)];
+    }
+    def has(self, k) -> bool {
+        d = self.buckets;
+        return str(k) in d;
+    }
+    def remove(self, k) {
+        d = self.buckets;
+        key = str(k);
+        if key in d {
+            d.remove(key);
+        }
+    }
+    def size(self) -> int {
+        return self.buckets.len();
+    }
+}
+
+# Split a string on a separator into a list of parts ("" -> empty when empty).
+pub def split(s: string, sep: string) -> list {
+    if s == "" { return []; }
+    return s.split(sep);
+}
+
+# Join a list of values with sep. Note the argument order differs from the
+# low-level `join` builtin (sep, xs) - this is (parts, sep) for readability.
+pub def join(parts: list, sep: string) -> string {
+    if parts.len() == 0 { return ""; }
+    out = str(parts[0]);
+    i = 1;
+    while i < parts.len() {
+        out = out + sep + str(parts[i]);
+        i = i + 1;
+    }
+    return out;
+}
+
+# True if xs contains an element equal to value.
+pub def contains(xs: list, value) -> bool {
+    for x in xs {
+        if x == value { return true; }
+    }
+    return false;
+}
+
+# Return a new list of unique elements (first-occurrence order preserved).
+pub def unique(xs: list) -> list {
+    seen = {};
+    out = [];
+    for x in xs {
+        if not (str(x) in seen) {
+            seen[str(x)] = true;
+            out.append(x);
+        }
+    }
+    return out;
+}
+
+# Fisher-Yates shuffle of a copy.
+pub def shuffle(xs: list) -> list {
+    out = [] + xs;
+    i = out.len() - 1;
+    while i > 0 {
+        j = int(rand_float() * float(i + 1));
+        if j > i { j = i; }
+        tmp = out[i];
+        out[i] = out[j];
+        out[j] = tmp;
+        i = i - 1;
+    }
+    return out;
+}
+
+pub def rand_float() -> float {
+    return float(time.now() % 100000) / 100000.0;
+}

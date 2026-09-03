@@ -1,7 +1,15 @@
 # =============================================================================
 #  Coco Language — Normative Grammar (EBNF)
 #  File:       grammar/coco.ebnf
-#  Status:     PHASE 0 DRAFT v0.1  (ratification tracked in docs/COCO_PLAN.md §22)
+#  Status:     PHASE 0 DRAFT v0.2  (ratification tracked in docs/COCO_PLAN.md §22)
+#  Change rec: v0.2 (2026-09-03) fixes malformed EBNF and adds productions
+#              required by the example corpus (examples/01–44 + stdlib *_test.co):
+#              try_stmt/catch, try-expr, match-as-expression, OOP facade
+#              (class/interface/record/extends/implements), gather_stmt,
+#              ref pattern `&pat`, `fn` alias for `def`, `do_while_stmt` spelling,
+#              removed duplicate pattern rules and the undefined `attr_of` /
+#              `call_arg_list` / `call_expr` references. ISO EBNF `{ }` is used
+#              for all repetition (no stray `*`/`+` postfix).
 #  Conformance:
 #    * This file is NORMATIVE. The parser (src/parser) must accept exactly the
 #      language generated here; golden-file tests derive their expectations
@@ -63,9 +71,13 @@ KEYWORD         = "def"    | "fn"    | "var"   | "let"   | "if"    | "elif"
    "yield" is a statement-start word: at statement position it opens a
    generator `yield [expr]` (see yield_stmt) and it also punctuates the
    comprehension form (§2 level 1); outside those positions it remains a
-   plain IDENTIFIER. Container/view/error type names below are plain
-   IDENTIFIERs bound in the prelude — list[int], gen[T], result[T, E],
-   option[int] / int?, any / dynamic all parse through base_type.           *)
+   plain IDENTIFIER. "gather" likewise opens the worklist loop
+   (`gather { seeds } { body }`, see gather_stmt) and the re-queue item
+   (`gather <expr>,`) only at those statement positions. "item" is a
+   contextual binding for the current worklist head inside a gather body.
+   Container/view/error type names below are plain IDENTIFIERs bound in the
+   prelude — list[int], gen[T], result[T, E], option[int] / int?, any /
+   dynamic all parse through base_type.                                     *)
 
 PRIMITIVE_TYPE_NAME = "int" | "i8" | "i16" | "i32" | "i64"
                     | "u8" | "u16" | "u32" | "u64" | "usize" | "isize"
@@ -136,8 +148,11 @@ PUNCTUATION     = "("  | ")"  | "["  | "]"  | "{"  | "}"  | ","  | ":"
 #    5    and                        left
 #    4    or                         left
 #    3    =>                         right     lambda arrow
-#    2    if c { e1 } else { e2 }  n/a     conditional EXPRESSION form
+#    2    if c { e1 } else { e2 }    n/a       conditional EXPRESSION form
 #    1    for p in e yield e         n/a       comprehension  [PROVISIONAL]
+#    (t)  try call(...) / call(...)? n/a       error propagation (try_expr,
+#                                              try_suffix) — not precedence-bound
+#    (m)  match e { ... }            n/a       match-as-expression (match_expr)
 # -----------------------------------------------------------------------------
 
 
@@ -149,6 +164,7 @@ PUNCTUATION     = "("  | ")"  | "["  | "]"  | "{"  | "}"  | ","  | ":"
 
 program         = { top_item } ;
 top_item        = func_def | struct_def | enum_def | trait_def | impl_def
+                | class_def | interface_def | record_def
                 | const_decl | var_decl | import_decl | export_decl
                 | statement ;
 
@@ -171,16 +187,19 @@ import_item     = "*" | import_binding ;
 import_binding  = IDENTIFIER [ "as" IDENTIFIER ] ;
 dotted_name     = IDENTIFIER , { "." , IDENTIFIER } ;
 export_decl     = "export" ( import_decl | decl_body ) ;
-decl_body       = func_def | struct_def | enum_def | const_decl ;
+decl_body       = func_def | struct_def | enum_def | const_decl
+                | class_def | interface_def | record_def ;
 
 
 (* ---- Functions ------------------------------------------------------------ *)
 
-func_def        = visibility , "def" IDENTIFIER [ type_params ]
+func_def        = visibility , ( "def" | "fn" ) IDENTIFIER [ type_params ]
                   "(" [ param_list ] ")" [ "->" type ] block
                 | visibility , "extern" , "def" IDENTIFIER [ type_params ]
                   "(" [ param_list ] ")" [ "->" type ] ";" ;
-visibility      = [ "pub" ] ;
+(* `fn` is a full alias for `def` in declaration position (examples/36,44). *)
+visibility      = [ "pub" ] | [ "pr" ] ;
+(* `pr` marks a declaration module-private (see §4 note 20).               *)
 
 type_params     = "[" type_param , { "," , type_param } "]" ;
 type_param      = IDENTIFIER [ "is" type_bound ] [ "=" type ] ;
@@ -232,11 +251,32 @@ trait_def       = visibility , "trait" IDENTIFIER [ type_params ]
                   "{" { trait_method } "}" ;
 trait_method    = func_sig                       (* signature only, ';'      *)
                 | func_def ;                     (* default body             *)
-func_sig        = visibility , "def" IDENTIFIER [ type_params ]
+func_sig        = visibility , ( "def" | "fn" ) IDENTIFIER [ type_params ]
                   "(" [ param_list ] ")" [ "->" type ] , ";" ;
 
 impl_def        = "impl" [ type_params ] , type , "for" , type ,
                   block ;
+
+
+(* ---- OOP facade: class / interface / record ---------------------------------------- *)
+(* The OOP forms desugar onto the struct/trait/impl model (see §4 note 25):
+     class Name implements I1, I2 { ... }  ->  struct + inherent impl + trait impls
+     class Derived extends Base { ... }     ->  single inheritance, virtual dispatch
+     interface I { def m(self) -> T; }      ->  trait (Go-style structural bound)
+     record Name(f: T, ...)                 ->  immutable field tuple (value type)  *)
+
+class_def       = visibility , "class" IDENTIFIER [ type_params ]
+                  [ "implements" type_name , { "," , type_name } ]
+                  [ "extends" type_name ]
+                  "{" { struct_member } "}" ;
+interface_def   = visibility , "interface" IDENTIFIER [ type_params ]
+                  "{" { trait_method } "}" ;
+record_def      = visibility , "record" IDENTIFIER
+                  "(" [ record_field , { "," , record_field } ] [ "," ] ")"
+                  block ;
+record_field    = IDENTIFIER , ":" , type ;
+type_name       = IDENTIFIER [ type_args ] ;
+type_args       = "[" type_list "]" ;
 
 
 (* ---- Constants & variables ---------------------------------------------------- *)
@@ -313,19 +353,20 @@ bucket_stmt     = "bucket" "release" IDENTIFIER
    (invisible to normal lookup); `bucket release x` moves it back.        *)
 
 expr_stmt       = expr ;
+call_expr       = postfix_expr ;
+(* A call-only expression (at least one call_suffix); used by `defer`/`spawn`. *)
 
 compound_stmt   = if_stmt | while_stmt | do_while_stmt | for_stmt
                 | match_stmt | select_stmt | unsafe_block | spawn_stmt
-                | gather_stmt ;
+                | gather_stmt | try_stmt ;
 
 if_stmt         = "if" expr block { "elif" expr block }
-                | if_stmt , "else" [ "if" expr block | block ] ;
-(* NOTE: the expression-form conditional reuses this shape at expr level;
-   `elif` is accepted as a legacy alias for `else if`.                       *)
+                  [ "else" block ] ;
+(* `elif` is accepted as a legacy alias for `else if` (see §4 note 2).     *)
 
 while_stmt      = "while" expr block ;
 
-doe_while_stmt  = "do" block "while" ( expr | pattern , "=" , expr ) , ";" ;
+do_while_stmt   = "do" block "while" ( expr | pattern , "=" , expr ) , ";" ;
 
 for_stmt        = "for" pattern "in" expr block ;
 
@@ -336,19 +377,34 @@ select_stmt     = "select" "{" { select_arm } "}" ;
 select_arm      = "case" [ IDENTIFIER "=" ] chan_op block ;
 chan_op         = [ "<-" ] , expr ;
 (* "<-expr" receives and discards (e.g. <-timer.after(...)).
-   Plain expr forms: ch.recv(), ch.send(v).                                 *)(* [PROVISIONAL] exact send/receive spelling pending concurrency RFC.       *)
+   Plain expr forms: ch.recv(), ch.send(v).
+   [PROVISIONAL] exact send/receive spelling pending concurrency RFC.       *)
 
 unsafe_block    = "unsafe" block ;
 
 spawn_stmt      = "spawn" call_expr ;            (* fire-and-forget spawn *)
+
+gather_stmt     = "gather" "{" seed_expr , { "," , seed_expr } [ "," ] "}"
+                  block ;
+(* Worklist loop: the block body may re-queue values with `gather expr,`
+   (gather_item_stmt); iteration ends when the worklist is empty or a
+   `break;` fires. `item` names the current head inside the body.        *)
+seed_expr       = expr ;
+
+try_stmt        = "try" block [ catch_clause ] ;
+catch_clause    = "catch" [ IDENTIFIER ] block ;
+(* `try { } catch e { }`: if `raise(v)` fires inside the try block the flow
+   jumps to the catch block binding `e` to `v`; `catch { }` discards the
+   value; a `try` without `catch` re-raises (see §4 note 26 and
+   examples/35).                                                          *)
 
 
 (* ---- Expressions --------------------------------------------------------------- *)
 
 expr_list       = expr , { "," , expr } [ "," ] ;
 
-expr            = closure_expr | lambda_expr | conditional_expr
-                | comprehension_expr | orexpr ;
+expr            = try_expr | match_expr | closure_expr | lambda_expr
+                | conditional_expr | comprehension_expr | orexpr ;
 
 lambda_expr     = param_list_no_default , "=>" , expr ;
 param_list_no_default = "(" [ IDENTIFIER { "," IDENTIFIER } ] ")" ;
@@ -360,8 +416,24 @@ param_list_no_default = "(" [ IDENTIFIER { "," IDENTIFIER } ] ")" ;
    the defining environment. §4 note 10. *)
 closure_expr    = "fn" , param_list , [ "->" , type ] , block ;
 
-conditional_expr= orexpr
-                | "if" expr "{" expr "}" "else" "{" expr "}" ;
+conditional_expr= "if" expr block_expr "else" block_expr ;
+block_expr      = "{" , { statement } , "}" ;   (* expression-position block *)
+(* The `if ... { c } else { e }` conditional is an EXPRESSION with no
+   dangling-else ambiguity; its branches are the same brace blocks as
+   statements and may themselves contain statements (the block's yielded
+   value is the final expression statement).                        *)
+
+match_expr      = "match" expr "{" { match_arm } "}"
+                  [ "else" block_expr ] ;
+(* `match` may appear as a STATEMENT (match_stmt) or, when used in an
+   expression position with a value flowing up, as an EXPRESSION (see
+   examples/38). A trailing `else { }` supplies the value when no arm
+   matches a non-exhaustive scrutinee.                            *)
+
+try_expr        = "try" expr ;
+(* Prefix error-propagation form: `try call(...)` returns early from the
+   enclosing `result[T,_]`-returning function on Err, equivalent to the
+   postfix `call(...)?` (see try_suffix and §4 note 6).            *)
 
 comprehension_expr                                   (* [PROVISIONAL] OQ #2 *)
                 = "for" pattern "in" expr { comp_clause } "yield" expr ;
@@ -403,7 +475,7 @@ index_body      = expr
 member_suffix   = ( "." | ".?." ) , IDENTIFIER ;
 try_suffix      = "?" ;                          (* error propagation      *)
 
-primary_expr    = atom , { attr_of } ;           (* attr_of folded into    *)
+primary_expr    = atom ;
 atom            = literal
                 | INTERP_STRING
                 | IDENTIFIER
@@ -412,10 +484,12 @@ atom            = literal
                 | map_display
                 | set_display
                 | lambda_expr
-                | unsafe_block_as_expr [PROVISIONAL]
-                | "new" type [ "(" [ call_arg_list ] ")" ]
+                | "unsafe" block                 (* unsafe as expr  [PROV.] *)
+                | "new" type [ call_suffix ]
                 | "self" | "Self"
                 ;
+
+call_arg_list   = call_arg , { "," , call_arg } [ "," ] ;
 
 list_display    = "[" [ expr_list ] "]"
                 | "[" expr "for" pattern "in" expr { comp_clause } "]"  (* listcomp [PROVISIONAL] *)
@@ -428,9 +502,10 @@ set_display     = "{" expr_list "}" ;
 
 pattern         = or_pattern ;
 or_pattern      = ctor_pat , { "|" , ctor_pat } ;   (* p1 | p2 alternation *)
-ctor_pat        = IDENTIFIER , "(" [ pat_field , { "," , pat_field } ] ")"
+ctor_pat        = ref_pat | IDENTIFIER , "(" [ pat_field , { "," , pat_field } ] ")"
                 | slice_pat | alias_pat | tuple_pat | range_pat | literal_pat
                 | binding_pat | wildcard | group_pat ;
+ref_pat         = "&" , pattern ;                (* ref pattern: `case &Point` *)
 alias_pat       = binding_pat , "@" , sub_pattern ;
 (* Rust-style `name @ sub-pattern`: binds the whole subject to `name` while
    matching the sub-pattern (e.g. `case n @ 1..=5 {`, `case t @ (a, b) {`). *)
@@ -452,8 +527,6 @@ literal_pat     = [ "-" ] , ( INT_LITERAL | FLOAT_LITERAL )
 range_pat       = [ "-" ] number_lit , ( ".." | "..=" ) , [ "-" ] number_lit ;
 number_lit      = INT_LITERAL | FLOAT_LITERAL ;
 
-tuple_pat       = "(" [ pattern , { "," , pattern } ] ")" ;
-ctor_pat        = IDENTIFIER , "(" [ pat_field , { "," , pat_field } ] ")" ;
 pat_field       = IDENTIFIER ":" pattern        (* named:  Point(x: 0, y)   *)
                 | pattern ;                     (* positional: Circle(r)    *)
 
@@ -468,7 +541,7 @@ type            = fn_type | prefixed_type ;
 fn_type         = "fn" "(" [ type_list ] ")" [ "->" type ] ;
 type_list       = type , { "," , type } ;
 
-prefixed_type   = type_prefix* , base_type , type_postfix* ;
+prefixed_type   = { type_prefix } , base_type , { type_postfix } ;
 type_prefix     = "*"                 (* raw pointer  — unsafe contexts     *)
                 | "&" [ "mut" ]       (* borrowed reference                 *)
                 ;
@@ -552,6 +625,27 @@ type_postfix    = "?" ;               (* option sugar:  int? == option[int]  *)
 #     escape the frame — returned, passed as a call argument, or stored into a
 #     member/index/container target (a store into a plain local variable stays
 #     in scope and is allowed). Violations are E-BORROW-ESCAPE errors.
+# 25. OOP FACADE (desugars to the struct/trait/impl model; examples/36,37):
+#     - `class Name implements I1, I2 { fields; methods }` → struct + inherent
+#       impl + `impl I1 for Name`, `impl I2 for Name`.
+#     - `class Derived extends Base { ... }` → single inheritance: inherits
+#       Base's fields and non-overridden methods; redefining a method overrides
+#       it VIRTUALLY (dispatch through a Base-typed reference hits the derived
+#       version).
+#     - `interface I { def m(self) -> T; }` → trait (Go-style structural bound).
+#     - `record Name(f: T, ...) { }` → immutable field tuple (value type) with
+#       structural `==` over its fields.
+#     - `fn` is a full alias for `def` in declaration position.
+# 26. TRY/RAISE/CATCH exceptions (examples/35): `try { } catch e { }` runs a
+#     block and, if `raise(v)` fires inside, jumps to the catch block binding
+#     `e` to `v`. `catch { }` (no binding) discards the value; a `try` without
+#     `catch` re-raises. This is DISTINCT from `try call(...)` /
+#     `call(...)?` error PROPAGATION on result[T,E] (see §2 level 17 and note
+#     6). "catchable" here means a raised value, not a result error.
+# 27. `match` is usable BOTH as a statement (match_stmt) and, when its value
+#     flows up to an expression position, as an EXPRESSION (match_expr,
+#     examples/38) whose arms are statement blocks that yield a value. Patterns
+#     additionally support ref patterns `&pat` (transparent deref, `case &Point`).
 # =============================================================================
 
 EOF_MARKER      = end_of_file ;

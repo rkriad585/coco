@@ -35,7 +35,7 @@ also compiled ahead-of-time to a self-contained native binary (GNU toolchain,
 - `{ }` blocks, `;` statement terminators — C/Go/Rust style, layout-free.
 - `def f(a: int, b: int) -> int { ... }` — typed function declarations.
   - diverging from Rust's `fn`, Python's `def`; keyword `def` retained for
-    familiarity. Open question: add `fn` alias.
+    familiarity; `fn` is accepted as an alias for `def` (resolved).
 - `struct`/`enum`/`trait`/`impl` — full nominal type system (Rust-like).
 - Type parameters `[T is Bound]` on functions/structs/enums/traits.
 - `match` with guards, exhaustiveness-aware arm checking.

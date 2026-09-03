@@ -250,6 +250,9 @@ void Checker::reportUnused(Scope& s, bool topLevel) {
                     }
                     break;
                 case SymK::Const:
+                    // `pub` consts are part of a module's public API; they
+                    // may be unused within the module but consumed externally.
+                    if (sym->pub) break;
                     warning(SpanRange::point(sym->declLine, sym->declCol),
                             "W0102", "unused constant '" + name + "'");
                     break;
@@ -496,6 +499,7 @@ SymP Checker::makeBuiltinFunc(std::string name, std::vector<TyP> params,
     sym->sig.required = required;
     funcs_[sym->name] = sym;
     sym->used = true;                // builtins are exempt from the unused-func lint
+    sym->builtin = true;
     scope_->declare(sym);
     return sym;
 }
@@ -731,9 +735,20 @@ void Checker::registerTopLevel(const std::vector<ast::StmtP>& prog) {
                         sym->sig.ret = genTy(unkTy());   // elem resolved later
                 }
                 funcs_[st->name] = sym;
-                if (Symbol* clash = scope_->declare(sym))
-                    error(st->span.line, st->span.col,
-                          "duplicate definition of '" + st->name + "'");
+                if (Symbol* clash = scope_->find(st->name)) {
+                    // A user top-level function may shadow a prelude builtin
+                    // (dogfooding: stdlib modules redefine join/split/etc.).
+                    if (clash->builtin) {
+                        scope_->syms.erase(st->name);
+                        scope_->declare(sym);
+                    } else {
+                        scope_->declare(sym);
+                        error(st->span.line, st->span.col,
+                              "duplicate definition of '" + st->name + "'");
+                    }
+                } else {
+                    scope_->declare(sym);
+                }
                 break;
             }
 
@@ -749,6 +764,8 @@ void Checker::registerTopLevel(const std::vector<ast::StmtP>& prog) {
                 declareLocal(SymK::Const, n,
                              ann ? ann : (vt ? vt : unkTy()), false,
                              st->span.line, st->span.col);
+                if (Symbol* cs = scope_->find(n))
+                    cs->pub = st->pub;
                 break;
             }
 

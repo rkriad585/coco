@@ -1,6 +1,16 @@
+# build trees
 build/
-_site/
-*.obj
-*.pdb
 build-asan/
 build-rel/
+*.obj
+*.pdb
+
+# GitHub Pages / Jekyll
+_site/
+.jekyll-cache/
+.bundle/
+Gemfile.lock
+
+# coco package manager temp files (created in cwd during install/update)
+.coco-registry-lib.toml
+.coco-sha

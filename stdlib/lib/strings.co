@@ -1,0 +1,78 @@
+# stdlib/lib/strings.co - string helpers (Coco-written, Phase 6).
+# Built on the runtime string builtins (upper/lower/trim/replace/split/...)
+# plus additional Coco-defined utilities. Import with: import lib.strings;
+
+pub def contains(s: string, sub: string) -> bool {
+    return s.contains(sub);
+}
+
+pub def starts_with(s: string, prefix: string) -> bool {
+    return s.starts_with(prefix);
+}
+
+pub def ends_with(s: string, suffix: string) -> bool {
+    return s.ends_with(suffix);
+}
+
+# Repeatedly replace all occurrences of `from` with `to`.
+pub def replace_all(s: string, from: string, to: string) -> string {
+    return s.replace(from, to);
+}
+
+# Split into a list of parts; empty separators split per character.
+pub def split(s: string, sep: string) -> list {
+    return s.split(sep);
+}
+
+# Join a list of strings with sep.
+pub def join(parts: list, sep: string) -> string {
+    if parts.len() == 0 { return ""; }
+    out = str(parts[0]);
+    i = 1;
+    while i < parts.len() {
+        out = out + sep + str(parts[i]);
+        i = i + 1;
+    }
+    return out;
+}
+
+# Repeat s n times (n <= 0 returns "").
+pub def repeat(s: string, n: int) -> string {
+    out = "";
+    i = 0;
+    while i < n {
+        out = out + s;
+        i = i + 1;
+    }
+    return out;
+}
+
+# Reverse a string (per code point).
+pub def reverse(s: string) -> string {
+    return join(reversed(s.split("")), "");
+}
+
+# Left-pad s to at least `width` chars with `pad` (or a space).
+pub def pad_left(s: string, width: int, pad: string) -> string {
+    p = pad;
+    if p == "" { p = " "; }
+    while s.len() < width {
+        s = p + s;
+    }
+    return s;
+}
+
+# Right-pad s to at least `width` chars with `pad` (or a space).
+pub def pad_right(s: string, width: int, pad: string) -> string {
+    p = pad;
+    if p == "" { p = " "; }
+    while s.len() < width {
+        s = s + p;
+    }
+    return s;
+}
+
+# Strip chars in `set` from both ends (default: whitespace).
+pub def strip(s: string) -> string {
+    return s.trim();
+}

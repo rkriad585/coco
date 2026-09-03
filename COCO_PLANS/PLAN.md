@@ -27,6 +27,12 @@ benchmarks). Phases are ordered for value-per-effort; later phases depend on ear
 
 Facts established by deep source review (see Appendix A for file:line evidence):
 
+> **Audit note:** this table is the **pre-Phase-1 snapshot** and is partially stale. Phases 1–3 of
+> this document are marked **COMPLETE** (diagnostics 2.0, warnings/lints/call-stack, special-file
+> convention), so the corresponding rows here (e.g. "Diagnostics", "Tooling gap" for
+> diagnostics/lint) are historical. For cross-plan ownership, see `DO_FIRST_PLAN.md` §Milestones →
+> the [ownership map](#ownership-map-across-this-repo-s-plans).
+
 | Area | Current state |
 |---|---|
 | Pipeline | `lexer → recursive-descent parser → AST → sema/type-checker → tree-walking interpreter` |
@@ -360,6 +366,14 @@ strictness so existing code keeps compiling.
 ---
 
 ## Phase 7 — Standard Library Breadth & Collections (Go stdlib roadmap)
+
+> **Dedup/ownership note:** the detailed spec for every module below lives in
+> `STD_LIBS_PLAN.md` (→) — treat this Phase 7 as the strategic **anchor/pointer**, not a parallel
+> spec. Also: **7.1 collections types** (`deque/heap/bitset/…`) are modeled in `DATA_TYPE_PLAN.md`
+> Phase 10 (→); **7.2 regexp** has an **implementation-conflict to resolve** — this line says a
+> C++ RE2-style NFA module, but `STD_LIBS_PLAN.md` Phase 0+5a proposes a **pure-Coco** regexp
+> engine. **Recommendation: adopt the pure-Coco approach** (better dogfooding for self-host); amend
+> this line accordingly before coding.
 
 **Goal:** deliver the high-priority groups from FEATURE_GAP §3.5, plus the reflection-driven
 serialization enabled in Phase 5.

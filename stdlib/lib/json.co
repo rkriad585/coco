@@ -1,0 +1,134 @@
+# stdlib/lib/json.co - JSON encode/decode (Coco-written, Phase 6).
+# `dumps` delegates to the native serializer; `loads` is a pure-Coco recursive
+# descent parser producing dict/list/str/float/bool/nil. Import with:
+#   import lib.json;
+
+# The native dumper is captured at load time (the module's own namespace is
+# bound under the same name `json` in the consumer, which shadows it inside).
+priv_dumps = json.dumps;
+
+# Serialize a value to a JSON string (native dumper).
+pub def dumps(v) -> string {
+    return priv_dumps(v);
+}
+
+# Parse a JSON string into Coco values. Parses objects, arrays, strings,
+# numbers, true/false/null. Raises on malformed input.
+pub def loads(s: string) {
+    p = Parser();
+    p.init(s);
+    return p.parse_value();
+}
+
+# Minimal JSON parser.
+struct Parser {
+    var src: string;
+    var i: int;
+    def init(self, s: string) {
+        self.src = s;
+        self.i = 0;
+    }
+    def skip_ws(self) {
+        while self.i < self.src.len() and self.peek() == " " {
+            self.i = self.i + 1;
+        }
+    }
+    def peek(self) -> string {
+        if self.i >= self.src.len() { return ""; }
+        return self.src[self.i..self.i + 1];
+    }
+    def advance(self) {
+        self.i = self.i + 1;
+    }
+    def parse_value(self) {
+        self.skip_ws();
+        c = self.peek();
+        if c == "{" { return self.parse_object(); }
+        if c == "[" { return self.parse_array(); }
+        if c == "\"" { return self.parse_string(); }
+        if c == "t" { self.expect_lit("true"); return true; }
+        if c == "f" { self.expect_lit("false"); return false; }
+        if c == "n" { self.expect_lit("null"); return nil; }
+        return self.parse_number();
+    }
+    def parse_object(self) -> dict {
+        self.advance();
+        out = {};
+        self.skip_ws();
+        if self.peek() == "}" { self.advance(); return out; }
+        while true {
+            self.skip_ws();
+            key = self.parse_string();
+            self.skip_ws();
+            while self.peek() == ":" {
+                self.advance();
+            }
+            val = self.parse_value();
+            out[key] = val;
+            self.skip_ws();
+            c = self.peek();
+            if c == "," { self.advance(); }
+            if c == "}" { self.advance(); break; }
+            if self.i >= self.src.len() { raise("json: unterminated object"); }
+            if c == "" { raise("json: unterminated object"); }
+        }
+        return out;
+    }
+    def parse_array(self) -> list {
+        self.advance();
+        out = [];
+        self.skip_ws();
+        if self.peek() == "]" { self.advance(); return out; }
+        while true {
+            v = self.parse_value();
+            out.append(v);
+            self.skip_ws();
+            c = self.peek();
+            if c == "," { self.advance(); }
+            if c == "]" { self.advance(); break; }
+            if c == "" { raise("json: unterminated array"); }
+        }
+        return out;
+    }
+    def parse_string(self) -> string {
+        self.advance();
+        out = "";
+        while true {
+            if self.i >= self.src.len() { raise("json: unterminated string"); }
+            c = self.src[self.i..self.i + 1];
+            if c == "\"" { self.advance(); break; }
+            if c == "\\" {
+                self.advance();
+                esc = self.peek();
+                if esc == "n" { out = out + "\n"; }
+                if esc == "t" { out = out + "\t"; }
+                if esc == "r" { out = out + "\r"; }
+                if esc == "\"" { out = out + esc; }
+                if esc == "\\" { out = out + "\\"; }
+                if esc == "/" { out = out + "/"; }
+                self.advance();
+            } else {
+                out = out + c;
+                self.advance();
+            }
+        }
+        return out;
+    }
+    def parse_number(self) -> float {
+        start = self.i;
+        while self.i < self.src.len() {
+            c = self.src[self.i..self.i + 1];
+            if c == " " or c == "," or c == "}" or c == "]" { break; }
+            self.advance();
+        }
+        tok = self.src[start..self.i];
+        return float(tok);
+    }
+    def expect_lit(self, lit: string) {
+        if self.src[self.i..self.i + lit.len()] == lit {
+            self.i = self.i + lit.len();
+        } else {
+            raise("json: expected '" + lit + "'");
+        }
+    }
+}

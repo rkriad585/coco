@@ -1,0 +1,11 @@
+# stdlib/lib/io_test.co - tests for lib.io.
+import lib.io;
+
+def main() {
+    path = ".io_tmp_test.txt";
+    io.append_file(path, "hello");
+    s = io.read_file(path);
+    assert(s == "hello");
+
+    print("io_test ok");
+}

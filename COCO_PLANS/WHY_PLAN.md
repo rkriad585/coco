@@ -11,7 +11,12 @@ This is a companion to `PLAN.md` (strategic, infra-centric) and `SYNTAX_PLAN.md`
 then implemented. The three documents cross-reference and share evidence tables.
 
 Like the sibling plans, this is *choice-bearing*: every ratification point lists options,
-trade-offs, and a recommendation. Nothing here is implemented yet unless marked otherwise.
+trade-offs, and a recommendation. **Unless marked otherwise, phases are future work — but several
+"whys" are already substantially DELIVERED** and are annotated `[MOSTLY IMPLEMENTED]` /
+`[PARTIALLY IMPLEMENTED]` at their headings below: **WHY-1** (batteries-included builtins is largely
+live — see `EXP_PLAN.md` §9 for the shipped list), **WHY-7** (the 10 stdlib modules now exist in
+`stdlib/lib/`), **WHY-8** (the `spawn/chan/select` engine is present), and the WHY-4 toolchain core.
+Those phases are re-scoped to "close residual gaps", not build from scratch.
 
 ---
 
@@ -101,7 +106,14 @@ For **maximum user-visible benefit quickly** (the "wow" order): WHY-1 (builtins)
 
 ---
 
-## Phase WHY-1 — Batteries-Included Builtins (Python productivity)
+## Phase WHY-1 — Batteries-Included Builtins (Python productivity) — **[MOSTLY IMPLEMENTED]**
+
+> **Status/dedup:** the bulk of this phase **ships** — `map filter reduce any all sum max min
+> enumerate sorted reversed upper lower trim contains starts_with ends_with replace split join
+> str int float bool type repr` are implemented free builtins (canonical inventory in
+> `EXP_PLAN.md` §9; syntax ownership `SYNTAX_PLAN.md` SP-8). **Residual gaps here:** `zip`,
+> `flatten`, `take/skip/first/last/count`, `round/floor/ceil/clamp/pow`, `typeof`, `input`, and
+> prelude `pi`/`e`. Re-scope this phase to "close the residual builtin gaps."
 
 **Why:** Python's #1 adoption driver is productivity from its stdlib + builtins — you solve a
 task in a line that other languages need a library for. Coco's builtin surface today is thin
@@ -255,7 +267,13 @@ tests green.
 
 ---
 
-## Phase WHY-7 — Stdlib Breadth & `pin.co`-driven Modules (Python batteries)
+## Phase WHY-7 — Stdlib Breadth & `pin.co`-driven Modules (Python batteries) — **[PARTIALLY IMPLEMENTED]**
+
+> **Status/dedup:** the stub→real migration is **largely done** — 10 modules now ship in
+> `stdlib/lib/` (`core, collections, io, json, math, os, path, regexp, strings, time`), each with
+> a `*_test.co`. Re-scope this phase to **breadth**: the still-pending deque/Counter/ordered-dict
+> types and wider module function sets, spec'd in `STD_LIBS_PLAN.md` (→) — which is the owner for
+> module APIs; this phase keeps only the "why" pointer.
 
 **Why:** beyond builtins, Python's *stdlib modules* (json, re, os, math, time, itertools,
 functools) are why people reach for it. Coco's modules are stubs (`math,time,io,mem,json,text,os`).
@@ -472,6 +490,10 @@ green.
 ---
 
 ## Roadmap Summary (suggested solo-dev order, value-first)
+
+> **Dedup note:** this ordering chart duplicates the "§3. Roadmap summary" chart near the top of
+> the file (lines ~72-94). Keep the §3 chart as canonical; this second copy is retained for
+> convenience but is **not** a separate plan — do not edit it independently.
 
 ```
 WHY-1  batteries-included builtins        (Python productivity, cheap)   ─┐

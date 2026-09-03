@@ -9,8 +9,13 @@ Status: **PAUSED — superseded for now by [`DO_FIRST_PLAN.md`](DO_FIRST_PLAN.md
 > This document's Go/Rust bootstrap methodology (§0-§2 below) remains the correct model to
 > **reopen at milestone M4** once the language is feature-complete.
 
-Status: **active** — the original roadmap for making the Coco toolchain (lexer, parser,
-type checker, two interpreters, native backend) write itself in Coco.
+> **NOTE (deduplicated):** the status line above ("PAUSED — superseded by DO_FIRST_PLAN.md")
+> is **authoritative**. The line that previously read "Status: **active** — the original roadmap…"
+> directly below has been removed because it contradicted the paused header above. This document
+> remains the canonical methodology reference for the Go/Rust bootstrap (fixed-point stage0→1→2),
+> to be **reopened at MO milestone M4** after `DO_FIRST_PLAN.md` completes the language. See
+> `DO_FIRST_PLAN.md` §Milestones for the reopening trigger. Everything in this doc is forward
+> reference, not active work.
 
 Grounding research: the actual bootstrapping strategy of **Go** (`go src/cmd/compile`,
 `cmd/dist`, GOCACHE, toolchain1→2→3 fixed points) and **Rust** (`./x.py`, stage0 →
@@ -80,8 +85,11 @@ What the C++ seed already gives us (verified in this repo):
   guards, destruction patterns, structs+methods, enums with exhaustive match, traits,
   generics w/ bounds, operator overloading, collections/slices/tuples/optionals,
   `result`+`try`, `defer`/`panic`, modules/visibility, spawn/channels/join, `select`,
-  FFI, iterators/views, weak refs, arenas, a 700-line wordcount capstone, and a
-  battery of std modules: `math, time, io, mem, json, text, os`.
+   FFI, iterators/views, weak refs, arenas, a 700-line wordcount capstone.
+- **Std modules (live source in `stdlib/lib/`, detailed in `STD_LIBS_PLAN.md`):** `core,
+  collections, io, json, math, os, path, regexp, strings, time` (each with a `*_test.co`
+  except `core`) — supersedes the earlier stub list `math, time, io, mem, json, text, os`
+  that predated the Phase-6 migration of C++ builtins into importable Coco modules.
 - **Runtime**: string index `s[i]`→char, slicing `s[a..b]`, `char` type + `ord/chr`,
   reference-semantic `List`/`Dict` (closures may mutate captured `var`), value-semantic
   structs, heap/weak objects.

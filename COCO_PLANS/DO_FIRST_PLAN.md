@@ -3,28 +3,49 @@
 **Status:** ACTIVE — this is the primary roadmap. Supersedes `SELF_HOST_PLAN.md` as the next thing
 to execute.
 **Decision (user directive, grounded in source + web research):** finish the **Coco language**
-itself before resuming Coco→Coco self-hosting. The language is currently incomplete: no catchable
-exceptions, no `class`/OOP, no `interface`, no `record`, partial patterns, no borrow checker, a
-near-empty stdlib, and a scalar-only native backend.
+itself before resuming Coco→Coco self-hosting. **Status note (updated):** Phases 1–4 below have
+**shipped** (catchable exceptions, OOP `class`/`interface`/`record`, `fn`/`dynamic`, slice/rest
+patterns incl. `match`-as-expression, memory/scoping keywords, multi-statement closures) — so
+§0 items 1–3 are now **historical / resolved**. The remaining roadmap (Phases 5–12: type-system
+hardening, stdlib in Coco, correctness, tooling, native breadth, borrow checker, concurrency,
+CLI) is the active work. See the **[ownership map](#ownership-map-across-this-repo-s-plans)**
+below so this plan, `SYNTAX_PLAN.md`, `EXP_PLAN.md`, `DATA_TYPE_PLAN.md`, `STD_LIBS_PLAN.md`,
+and `WHY_PLAN.md` don't duplicate each other.
 **Implementation languages:** C++ (extend existing seed), **Go** (pure-tooling CLI accents), and
 **Rust** (optional components that map to Coco's Rust-inspired model). Every phase below shows
 real code in the relevant language so the plan is executable, not prose.
 
 ---
 
-## 0. Evidence the language is not done (source-backed)
+## 0. Evidence the language is not done (source-backed) — *historical; items 1–3 now RESOLVED*
+
+> Revised: items 1, 2, 3 below were the original rationale. Items **1–2 (keywords + catchable
+> exceptions) and 3 (stdlib)** have been **shipped** (see Phase 1/2/3.5 status notes and
+> `stdlib/lib/`). Item **4** is partially resolved (patterns, closures, and generators landed in
+> Phases 3/3.5/4); the remaining parts (borrow/move checker, default generic params, `iota`
+> discriminants, crypto/extensive stdlib, `coco fmt/repl/check/lint`) are still open. Item **5**
+> (scalar-only native backend) is still accurate. Kept below for provenance.
 
 1. **Keyword table** `src/lex/lexer.cpp:38-50` has no `class`, `interface`, `record`, `fn`,
    `extends`, `implements`, `dynamic`, `try`.`try/catch` does not exist; `raise` throws
    `SignalRaise` which **nothing catches in-language** (`src/interp/runtime.cpp:1290`);
-   `catch_panic` only catches `PanicSignal` (`:544`).
+   `catch_panic` only catches `PanicSignal` (`:544`). **[RESOLVED]** — all of these keywords
+   are now in `lexer.cpp:40-46`; `try/catch/raise` parse and run (see Phase 1 status below).
 2. This **broke the self-host parser** (`selfhost/parse.co`, stack-overflow 0xC00000FD):
-   error recovery needs a catchable error. A language gap, not a port bug.
+   error recovery needs a catchable error. A language gap, not a port bug. **[RESOLVED by
+   Phase 1]** — catchable `try/catch` now exists, unblocking self-host error recovery when
+   `SELF_HOST_PLAN.md` reopens at M4.
 3. **Stdlib is almost empty as source** — only `stdlib/text/slug.co`; `json/math/time/os/io/mem`
-   are C++ baked-in builtins (`src/interp/runtime.cpp` builtin tables).
+   are C++ baked-in builtins (`src/interp/runtime.cpp` builtin tables). **[RESOLVED, Phase 6
+   largely done]** — `stdlib/lib/` now holds `core, collections, io, json, math, os, path,
+   regexp, strings, time` as importable Coco modules (see `STD_LIBS_PLAN.md`).
 4. **Documented unfinishings** (`docs/FEATURE_GAP_ANALYSIS.md` §3-5, `PLAN.md`): slice/rest
    patterns, multi-statement closures, borrow/move checker, default generic params,
    `iota`-like discriminants, collections/strings/regexp/path stdlib, `coco fmt/repl/check/lint`.
+   **[PARTIALLY RESOLVED]** — slice/rest patterns, multi-statement closures, and generators
+   landed in Phases 3/3.5/4; collections/strings/regexp/path now exist in `stdlib/lib/`. Still
+   open: borrow/move checker (Phase 5.5/10), default generic params + iota discriminants
+   (Phase 5), `coco fmt/repl/check/lint` (Phase 8).
 5. **Native backend** `src/backend/native.cpp` lowers only *scalar* functions; not strings/lists/`main`.
 
 The plan below closes all of these, with code at every step.
@@ -45,6 +66,10 @@ OOP keywords as **desugaring** so existing code keeps working:
 ---
 
 ## Phase 1 — Catchable exceptions (`try { } catch e { }`)
+
+> **Status: DONE** — `try`, `catch e { }`, and `raise` parse and run end-to-end (statement form
+> *and* expression form returning a value), verified in `examples/35_try_catch.co` (VM ≡
+> tree-walker; nested re-raise and non-string payloads supported). Exit criteria met.
 
 **Goal:** unblock error recovery; a compiler/fmt/repl/repl-all need catchable errors.
 
@@ -131,7 +156,7 @@ class Animal {                                 # == struct + inherent impl
     def speak(self) -> string { return "?"; }
 }
 class Dog extends Animal implements Named {    # single inheritance + trait
-    override def speak(self) -> string { return "woof"; }
+    def speak(self) -> string { return "woof"; }
     def name(self) -> string { return self.name; }
 }
 record Point(x: int, y: int) { }               # immutable, structural ==
@@ -272,6 +297,11 @@ stable for new forms.
 
 ## Phase 4 — Expression & statement completeness
 
+> **Status: DONE** — multi-statement block closures `fn (v) { stmts }` work end-to-end (checker +
+> runtime), verified in `examples/44_block_closures.co` (VM ≡ tree-walker); the `fn` alias for
+> `def` also landed (Phase 2). See `SYNTAX_PLAN.md` SP-11 for the still-missing `fn`-as-first-class
+> value breadth (resumable generator frames) — not part of this milestone.
+
 **Goal:** the constructs the user said "are not working" — chiefly multi-statement closures.
 
 **Target Coco (multi-statement closure):**
@@ -332,6 +362,13 @@ existing `tests/negative/n*.co` are still rejected with identical text.
 ---
 
 ## Phase 6 — Stdlib breadth as real Coco modules
+
+> **Status: largely DONE (see `STD_LIBS_PLAN.md` for the full module spec).** The stdlib now
+> ships as importable Coco source in `stdlib/lib/` — `core, collections, io, json, math, os,
+> path, regexp, strings, time` — each with a `*_test.co` (except `core`). Remaining work here is
+> *breadth/enhancement* (more functions; fix `json` recursion; real `regexp` engine), owned by
+> `STD_LIBS_PLAN.md`. The `import lib.x` resolution and module-export constraints in
+> `src/interp/runtime.cpp` are the implementation surface.
 
 **Goal:** replace C++ builtins with importable, dogfoodable Coco source so the future self-host
 compiler has a substrate (`SELF_HOST_PLAN.md` Phase 2 core requirement).
@@ -483,14 +520,39 @@ func (m *Mutex) Unlock()     { <-m.ch }
 
 ## Milestones → then RETURN TO SELF-HOSTING
 
-- **M0 (P1-3):** catchable errors; OOP `class/interface/record/fn/dynamic`; patterns at Rust parity.
-- **M1 (P4-6):** closures/expressions; type system; stdlib in Coco.
+- **M0 (P1-4):** catchable errors; OOP `class/interface/record/fn/dynamic`; patterns at Rust
+  parity; memory/scoping keywords; multi-statement closures. **[COMPLETE — see status notes on
+  Phases 1/2/3/3.5 and examples 35–44.]**
+- **M1 (P4-6):** closures/expressions; type system; stdlib in Coco. **[P4 closures + P6 stdlib
+  largely DONE; P5 type-system hardening in progress.]**
 - **M2 (P7-9):** runtime correctness; tooling; native lowers itself.
 - **M3 (P10-12):** borrow checker, concurrency/GC, standard CLI.
 - **M4:** reopen `SELF_HOST_PLAN.md` and run the Go/Rust bootstrap: seed (C++) compiles
   `selfhost/compiler.co` → stage0 → stage1 → stage2 fixed point. Now the target has catchable
   errors, OOP to structure modules, a real stdlib substrate, and a native backend that lowers its
   own source. `selfhost/parse.co` is parked until then.
+
+---
+
+## Ownership map (across this repo's plans) — deduplication guide
+
+Feature families span several plans. To keep each feature in **exactly one** place and cross-ref
+the rest, own by:
+
+| Feature family | Owner file |
+|---|---|
+| Stdlib **module** packaging/APIs (`json, os, io, math, time, collections, path, regexp, strings`, all future modules) | `STD_LIBS_PLAN.md` |
+| Core data **types** internals (big_int, complex, decimal, rational, bytes, collections types, sync types, time/Duration, reflect) | `DATA_TYPE_PLAN.md` |
+| **Syntax**/sugar/operators (walrus, pipe, comprehensions, splat, `any` keyword, decorators, FFI, patterns) | `SYNTAX_PLAN.md` |
+| Free **builtin** names & math-expression surface (defaults, operator traits, vector math) | `EXP_PLAN.md` |
+| **Why**/demand drivers + sequencing | `WHY_PLAN.md` (stubs + cross-refs only) |
+| Compiler **infra** (VM, AOT, diagnostics, toolchain, borrowck, GC, self-host bootstrap) | `PLAN.md`, `DO_FIRST_PLAN.md`, `SELF_HOST_PLAN.md` |
+
+Consequences already applied in this repo: builtins `map/filter/reduce/sum/min/max/sorted/
+enumerate/reduce/zip` are spec'd in `EXP_PLAN.md`/`SYNTAX_PLAN.md` (their "why" is `WHY_PLAN.md`
+WHY-1), not re-spec'd here; math function breadth is partitioned as *builtins→EXP*, *float
+type→DATA_TYPE*, *module→STD_LIBS*; the `result[T,E]`/`error` combinators live in
+`DATA_TYPE_PLAN.md` Phase 8 + `EXP_PLAN.md` Phase 14, not here.
 
 ---
 
