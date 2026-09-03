@@ -1,0 +1,8 @@
+import lib.collections;
+def main() {
+    m = collections.HashMap();
+    m.put("a", 1);
+    m.put("b", 2);
+    print("get b:", m.get("b"));
+    print("join:", collections.join(["x", "y", "z"], "-"));
+}

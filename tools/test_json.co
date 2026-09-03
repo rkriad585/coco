@@ -1,0 +1,7 @@
+import lib.json;
+
+def main() {
+    print("B");
+    v = json.loads("1");
+    print("A", v);
+}

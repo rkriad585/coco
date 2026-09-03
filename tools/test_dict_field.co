@@ -1,0 +1,17 @@
+struct Box {
+    var buckets: dict;
+    def put(self, k, v) {
+        self.buckets[k] = v;
+    }
+    def get(self, k) {
+        d = self.buckets;
+        return d[k];
+    }
+}
+def main() {
+    b = Box();
+    print("initial:", repr(b.buckets));
+    b.put("a", 1);
+    print("after put:", repr(b.buckets));
+    print("get:", b.get("a"));
+}
